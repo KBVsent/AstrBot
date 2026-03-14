@@ -15,6 +15,7 @@ from .astr_message_event import AstrMessageEvent
 from .astrbot_message import AstrBotMessage
 from .message_session import MessageSesion
 from .platform_metadata import PlatformMetadata
+from .raw_platform_event import RawPlatformEvent
 
 
 class PlatformStatus(Enum):
@@ -183,3 +184,21 @@ class Platform(abc.ABC):
             NotImplementedError: 平台未实现统一 Webhook 模式
         """
         raise NotImplementedError(f"平台 {self.meta().name} 未实现统一 Webhook 模式")
+
+    async def emit_raw_platform_event(
+        self,
+        payload: Any,
+        *,
+        meta: dict[str, Any] | None = None,
+        plugins_name: list[str] | None = None,
+    ) -> bool:
+        """发射平台原始事件到框架级 hook。"""
+        from astrbot.core.pipeline.context_utils import call_raw_platform_event_hook
+
+        event = RawPlatformEvent(
+            payload=payload,
+            platform_meta=self.meta(),
+            meta=meta,
+            plugins_name=plugins_name,
+        )
+        return await call_raw_platform_event_hook(event)

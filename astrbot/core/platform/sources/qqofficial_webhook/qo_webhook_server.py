@@ -10,6 +10,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from astrbot.api import logger
+from astrbot.core.platform.platform import Platform
 from astrbot.core.platform.webhook_server import FastAPIWebhookServer
 
 from ..qqofficial.qqofficial_platform_adapter import _ensure_group_message_create_parser
@@ -72,7 +73,11 @@ def _verify_qq_webhook_signature(
 
 class QQOfficialWebhook:
     def __init__(
-        self, config: dict, event_queue: asyncio.Queue, botpy_client: Client
+        self,
+        config: dict,
+        event_queue: asyncio.Queue,
+        botpy_client: Client,
+        platform: Platform,
     ) -> None:
         self.appid = config["appid"]
         self.secret = config["secret"]
@@ -100,6 +105,7 @@ class QQOfficialWebhook:
         )
         self.client = botpy_client
         self.event_queue = event_queue
+        self.platform = platform
         self.shutdown_event = asyncio.Event()
         self._connection: ConnectionSession | None = None
 
@@ -189,6 +195,15 @@ class QQOfficialWebhook:
         event = msg.get("t")
         opcode = msg.get("op")
         data = msg.get("d")
+
+        context = {
+            "opcode": opcode,
+            "event_type": event,
+            "is_validation": opcode == 13,
+            "request_path": getattr(request, "path", ""),
+            "request_method": getattr(request, "method", ""),
+        }
+        await self.platform.emit_raw_platform_event(msg, meta=context)
 
         if opcode == 13:
             # validation
