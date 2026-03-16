@@ -209,7 +209,7 @@ class QQOfficialWebhook:
             "request_path": getattr(request, "path", ""),
             "request_method": getattr(request, "method", ""),
         }
-        await self.platform.emit_raw_platform_event(msg, meta=context)
+        stopped = await self.platform.emit_raw_platform_event(msg, meta=context)
 
         if opcode == 13:
             # validation
@@ -233,7 +233,7 @@ class QQOfficialWebhook:
                 return {"opcode": 12}
             self._seen_event_ids[event_id] = now
 
-        if event and opcode == BotWebSocket.WS_DISPATCH_EVENT:
+        if not stopped and event and opcode == BotWebSocket.WS_DISPATCH_EVENT:
             event = msg["t"].lower()
             if self._connection is None:
                 logger.warning(
