@@ -276,8 +276,11 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 payload["keyboard"] = keyboard_payload
 
         # 按钮回调场景用 event_id 换取被动回复配额；其余用 msg_id
+        # 注意：botpy 的 Interaction 有两个 id——
+        #   interaction.id       = 内层 data.id，用于 ack (PUT /interactions/{id})
+        #   interaction.event_id = 外层派发事件 id，才是接收消息 API 的 event_id 参数
         if is_interaction:
-            payload["event_id"] = self.message_obj.message_id
+            payload["event_id"] = getattr(source, "event_id", None) or ""
         else:
             payload["msg_id"] = self.message_obj.message_id
 
