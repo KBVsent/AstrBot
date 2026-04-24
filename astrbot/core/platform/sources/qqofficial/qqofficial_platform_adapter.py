@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import botpy
+import botpy.interaction
 import botpy.message
 from botpy import Client
 from botpy.gateway import BotWebSocket
@@ -31,6 +32,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.io import download_file
 
 from ...register import register_platform_adapter
+from .components import QQCButton, QQCKeyboard
 from .qqofficial_message_event import QQOfficialMessageEvent
 
 # remove logger handler
@@ -115,6 +117,31 @@ class botClient(Client):
         self.platform.remember_session_scene(abm.session_id, "friend")
         self._commit(abm)
 
+    # 收到按钮点击回调
+    async def on_interaction_create(
+        self, interaction: botpy.interaction.Interaction
+    ) -> None:
+        abm = QQOfficialPlatformAdapter._parse_interaction_to_abm(interaction)
+        if abm is None:
+            logger.warning(
+                f"[QQOfficial] 无法识别的 interaction chat_type: {interaction.chat_type}"
+            )
+            return
+        scene = {0: "channel", 1: "group", 2: "friend"}.get(
+            interaction.chat_type, "friend"
+        )
+        self.platform.remember_session_scene(abm.session_id, scene)
+        self._commit(abm)
+        asyncio.create_task(self._ack_interaction(interaction))
+
+    async def _ack_interaction(
+        self, interaction: botpy.interaction.Interaction
+    ) -> None:
+        try:
+            await self.api.on_interaction_result(interaction.id, 0)
+        except Exception as e:
+            logger.warning(f"[QQOfficial] interaction ack 失败: {e}")
+
     def _commit(self, abm: AstrBotMessage) -> None:
         self.platform.remember_session_message_id(abm.session_id, abm.message_id)
         self.platform.commit_event(
@@ -172,11 +199,13 @@ class QQOfficialPlatformAdapter(Platform):
                 public_messages=True,
                 public_guild_messages=True,
                 direct_message=guild_dm,
+                interaction=True,
             )
         else:
             self.intents = botpy.Intents(
                 public_guild_messages=True,
                 direct_message=guild_dm,
+                interaction=True,
             )
         self.client = botClient(
             intents=self.intents,
@@ -203,6 +232,14 @@ class QQOfficialPlatformAdapter(Platform):
         session: MessageSesion,
         message_chain: MessageChain,
     ) -> None:
+        use_md = getattr(message_chain, "use_markdown_", None)
+        has_keyboard = any(
+            isinstance(seg, (QQCKeyboard, QQCButton)) for seg in message_chain.chain
+        )
+        if has_keyboard and use_md is False:
+            use_md = True
+        convert_img = has_keyboard and use_md is not False
+
         (
             plain_text,
             image_base64,
@@ -211,7 +248,11 @@ class QQOfficialPlatformAdapter(Platform):
             video_file_source,
             file_source,
             file_name,
-        ) = await QQOfficialMessageEvent._parse_to_qqofficial(message_chain)
+            keyboard_payload,
+        ) = await QQOfficialMessageEvent._parse_to_qqofficial(
+            message_chain,
+            convert_image_to_markdown=convert_img,
+        )
         if (
             not plain_text
             and not image_path
@@ -219,6 +260,7 @@ class QQOfficialPlatformAdapter(Platform):
             and not record_file_path
             and not video_file_source
             and not file_source
+            and not keyboard_payload
         ):
             return
 
@@ -230,7 +272,29 @@ class QQOfficialPlatformAdapter(Platform):
             )
             return
 
-        payload: dict[str, Any] = {"content": plain_text, "msg_id": msg_id}
+        if keyboard_payload and not plain_text:
+            plain_text = QQOfficialMessageEvent.EMPTY_MARKDOWN_PLACEHOLDER
+
+        has_media = bool(
+            image_base64 or record_file_path or video_file_source or file_source
+        )
+        # media 路径走 msg_type=7（纯媒体），其余走 content 或 markdown+keyboard
+        if has_media:
+            payload: dict[str, Any] = {"content": plain_text, "msg_id": msg_id}
+        elif use_md is False or not plain_text:
+            payload = {"content": plain_text, "msg_id": msg_id}
+        else:
+            from botpy.types.message import MarkdownPayload as _MD  # noqa: PLC0415
+
+            payload = {
+                "markdown": _MD(content=plain_text),
+                "msg_type": 2,
+                "msg_id": msg_id,
+            }
+            if keyboard_payload:
+                payload["keyboard"] = keyboard_payload
+        # 媒体 + keyboard 时，稍后需要补发一条 markdown+keyboard
+        need_keyboard_followup = has_media and keyboard_payload is not None
         ret: Any = None
         send_helper = SimpleNamespace(bot=self.client)
 
@@ -353,6 +417,36 @@ class QQOfficialPlatformAdapter(Platform):
         sent_message_id = self._extract_message_id(ret)
         if sent_message_id:
             self.remember_session_message_id(session.session_id, sent_message_id)
+
+        # 媒体抢占 msg_type=7 后补发 markdown+keyboard
+        if need_keyboard_followup and keyboard_payload:
+            from botpy.types.message import MarkdownPayload as _MD  # noqa: PLC0415
+
+            followup: dict[str, Any] = {
+                "markdown": _MD(content=plain_text),
+                "msg_type": 2,
+                "msg_id": msg_id,
+                "keyboard": keyboard_payload,
+                "msg_seq": random.randint(1, 10000),
+            }
+            try:
+                if session.message_type == MessageType.GROUP_MESSAGE:
+                    scene = self._session_scene.get(session.session_id)
+                    if scene == "group":
+                        await self.client.api.post_group_message(
+                            group_openid=session.session_id,
+                            **followup,
+                        )
+                elif session.message_type == MessageType.FRIEND_MESSAGE:
+                    followup.pop("msg_id", None)
+                    await QQOfficialMessageEvent.post_c2c_message(
+                        send_helper,  # type: ignore
+                        openid=session.session_id,
+                        **followup,
+                    )
+            except Exception as e:
+                logger.warning(f"[QQOfficial] keyboard 补发失败: {e}")
+
         await super().send_by_session(session, message_chain)
 
     def remember_session_message_id(self, session_id: str, message_id: str) -> None:
@@ -584,6 +678,55 @@ class QQOfficialPlatformAdapter(Platform):
         else:
             raise ValueError(f"Unknown message type: {message_type}")
         abm.self_id = "qq_official"
+        return abm
+
+    @staticmethod
+    def _parse_interaction_to_abm(
+        interaction: botpy.interaction.Interaction,
+    ) -> AstrBotMessage | None:
+        """将 QQ 按钮交互事件包装成 AstrBotMessage。
+
+        chat_type: 0=频道 / 1=群 / 2=C2C
+        """
+        abm = AstrBotMessage()
+        abm.timestamp = int(time.time())
+        abm.raw_message = interaction
+        abm.message_id = interaction.id or ""
+        abm.self_id = "qq_official"
+        abm.message_str = ""
+        abm.message = []
+
+        resolved = interaction.data.resolved if interaction.data else None
+        button_id = getattr(resolved, "button_id", None) if resolved else None
+        user_id_in_resolved = getattr(resolved, "user_id", None) if resolved else None
+
+        chat_type = interaction.chat_type
+        if chat_type == 0:
+            # 频道
+            abm.type = MessageType.GROUP_MESSAGE
+            abm.group_id = str(interaction.channel_id or interaction.guild_id or "")
+            abm.session_id = abm.group_id
+            abm.sender = MessageMember(user_id_in_resolved or "", "")
+        elif chat_type == 1:
+            # 群
+            abm.type = MessageType.GROUP_MESSAGE
+            abm.group_id = interaction.group_openid or ""
+            abm.session_id = abm.group_id
+            abm.sender = MessageMember(
+                interaction.group_member_openid or user_id_in_resolved or "", ""
+            )
+        elif chat_type == 2:
+            # C2C
+            abm.type = MessageType.FRIEND_MESSAGE
+            abm.session_id = interaction.user_openid or ""
+            abm.sender = MessageMember(abm.session_id, "")
+        else:
+            return None
+
+        logger.debug(
+            f"[QQOfficial] interaction_create chat_type={chat_type} "
+            f"button_id={button_id} session={abm.session_id}"
+        )
         return abm
 
     def run(self):

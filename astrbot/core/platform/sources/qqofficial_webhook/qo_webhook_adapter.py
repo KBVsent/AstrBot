@@ -3,6 +3,7 @@ import logging
 from typing import Any, cast
 
 import botpy
+import botpy.interaction
 import botpy.message
 from botpy import Client
 
@@ -72,6 +73,31 @@ class botClient(Client):
         abm.session_id = abm.sender.user_id
         self.platform.remember_session_scene(abm.session_id, "friend")
         self._commit(abm)
+
+    # 收到按钮点击回调
+    async def on_interaction_create(
+        self, interaction: botpy.interaction.Interaction
+    ) -> None:
+        abm = QQOfficialPlatformAdapter._parse_interaction_to_abm(interaction)
+        if abm is None:
+            logger.warning(
+                f"[QQOfficial] 无法识别的 interaction chat_type: {interaction.chat_type}"
+            )
+            return
+        scene = {0: "channel", 1: "group", 2: "friend"}.get(
+            interaction.chat_type, "friend"
+        )
+        self.platform.remember_session_scene(abm.session_id, scene)
+        self._commit(abm)
+        asyncio.create_task(self._ack_interaction(interaction))
+
+    async def _ack_interaction(
+        self, interaction: botpy.interaction.Interaction
+    ) -> None:
+        try:
+            await self.api.on_interaction_result(interaction.id, 0)
+        except Exception as e:
+            logger.warning(f"[QQOfficial] interaction ack 失败: {e}")
 
     def _commit(self, abm: AstrBotMessage) -> None:
         self.platform.remember_session_message_id(abm.session_id, abm.message_id)
