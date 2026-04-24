@@ -199,7 +199,8 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             botpy.message.Message
             | botpy.message.GroupMessage
             | botpy.message.DirectMessage
-            | botpy.message.C2CMessage,
+            | botpy.message.C2CMessage
+            | botpy.interaction.Interaction,
         ):
             logger.warning(f"[QQOfficial] 不支持的消息源类型: {type(source)}")
             return None
@@ -260,22 +261,30 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         if keyboard_payload and not plain_text:
             plain_text = self.EMPTY_MARKDOWN_PLACEHOLDER
 
+        is_interaction = isinstance(source, botpy.interaction.Interaction)
         if use_md is False:
             payload: dict = {
                 "content": plain_text,
                 "msg_type": 0,
-                "msg_id": self.message_obj.message_id,
             }
         else:
             payload = {
                 "markdown": MarkdownPayload(content=plain_text) if plain_text else None,
                 "msg_type": 2,
-                "msg_id": self.message_obj.message_id,
             }
             if keyboard_payload is not None:
                 payload["keyboard"] = keyboard_payload
 
-        if not isinstance(source, botpy.message.Message | botpy.message.DirectMessage):
+        # 按钮回调场景用 event_id 换取被动回复配额；其余用 msg_id
+        if is_interaction:
+            payload["event_id"] = self.message_obj.message_id
+        else:
+            payload["msg_id"] = self.message_obj.message_id
+
+        if not isinstance(
+            source,
+            botpy.message.Message | botpy.message.DirectMessage,
+        ):
             payload["msg_seq"] = random.randint(1, 10000)
 
         ret = None
@@ -444,6 +453,51 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                     plain_text=plain_text,
                     stream=stream,
                 )
+
+            case botpy.interaction.Interaction():
+                # 按钮点击回调的回复：按 chat_type 路由
+                # chat_type: 0=频道 / 1=群 / 2=C2C
+                chat_type = source.chat_type
+                if chat_type == 1 and source.group_openid:
+                    ret = await self._send_with_stream_newline_fix(
+                        send_func=lambda retry_payload: self.bot.api.post_group_message(
+                            group_openid=source.group_openid,  # type: ignore
+                            **retry_payload,
+                        ),
+                        payload=payload,
+                        plain_text=plain_text,
+                        stream=stream,
+                    )
+                elif chat_type == 2 and source.user_openid:
+                    ret = await self._send_with_stream_newline_fix(
+                        send_func=lambda retry_payload: self.post_c2c_message(
+                            openid=source.user_openid,  # type: ignore
+                            **retry_payload,
+                        ),
+                        payload=payload,
+                        plain_text=plain_text,
+                        stream=stream,
+                    )
+                elif chat_type == 0 and source.channel_id:
+                    # 频道：v1 接口不接受 msg_type / msg_seq / event_id
+                    guild_payload = payload.copy()
+                    guild_payload.pop("msg_type", None)
+                    guild_payload.pop("msg_seq", None)
+                    # 频道接口用 msg_id 或 event_id 都可，保留 event_id
+                    ret = await self._send_with_stream_newline_fix(
+                        send_func=lambda retry_payload: self.bot.api.post_message(
+                            channel_id=source.channel_id,  # type: ignore
+                            **retry_payload,
+                        ),
+                        payload=guild_payload,
+                        plain_text=plain_text,
+                        stream=stream,
+                    )
+                else:
+                    logger.warning(
+                        "[QQOfficial] interaction 无法路由: chat_type=%s",
+                        chat_type,
+                    )
 
             case _:
                 pass
