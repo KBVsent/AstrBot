@@ -259,6 +259,23 @@ class StatService:
             logger.error(traceback.format_exc())
             raise StatServiceError(str(exc)) from exc
 
+    async def get_top_commands(self, offset_sec: int = 86400, limit: int = 20) -> dict:
+        """获取最常被触发的指令排行。"""
+        try:
+            rows = await self.db_helper.get_top_commands(offset_sec, limit)
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            raise StatServiceError(str(e)) from e
+        commands = [
+            {
+                "command_name": command_name,
+                "plugin_name": plugin_name,
+                "count": count,
+            }
+            for command_name, plugin_name, count in rows
+        ]
+        return {"commands": commands}
+
     @staticmethod
     def _ensure_aware_utc(value: datetime) -> datetime:
         if value.tzinfo is None:

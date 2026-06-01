@@ -66,6 +66,16 @@ async def get_provider_token_stats(
     return await _run(service.get_provider_token_stats(days))
 
 
+@router.get("/stats/top-commands")
+async def get_top_commands(
+    offset_sec: int = Query(default=86400),
+    limit: int = Query(default=20),
+    _auth: AuthContext = Depends(require_system_scope),
+    service: StatService = Depends(get_service),
+):
+    return await _run(service.get_top_commands(offset_sec, limit))
+
+
 @router.get("/stats/version")
 async def get_version(
     _auth: AuthContext = Depends(require_system_scope),
@@ -169,6 +179,21 @@ async def get_dashboard_provider_token_stats(
     service: StatService = Depends(get_service),
 ):
     return await _run(service.get_provider_token_stats(_parse_int(days, 1, "days")))
+
+
+@legacy_router.get("/top-commands")
+async def get_dashboard_top_commands(
+    offset_sec: int | None = Query(default=86400),
+    limit: int | None = Query(default=20),
+    _username: str = Depends(require_dashboard_user),
+    service: StatService = Depends(get_service),
+):
+    return await _run(
+        service.get_top_commands(
+            _parse_int(offset_sec, 86400, "offset_sec"),
+            _parse_int(limit, 20, "limit"),
+        )
+    )
 
 
 @legacy_router.get("/version")
