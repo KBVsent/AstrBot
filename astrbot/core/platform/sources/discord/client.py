@@ -16,16 +16,24 @@ class DiscordBotClient(discord.Bot):
     """Discord客户端封装"""
 
     def __init__(
-        self, token: str, proxy: str | None = None, allow_bot_messages: bool = False
+        self,
+        token: str,
+        proxy: str | None = None,
+        allow_bot_messages: bool = False,
+        message_mode: str = "mention_and_dm",
     ) -> None:
         self.token = token
         self.proxy = proxy
         self.allow_bot_messages = allow_bot_messages
+        self.message_mode = message_mode
 
-        # 设置Intent权限，遵循权限最小化原则
+        # 设置Intent权限，遵循权限最小化原则。
+        # default() 本身已关闭 message_content / members 两个特权 intent，
+        # 仅 full_message 模式才需要订阅频道全部消息正文与成员事件。
         intents = discord.Intents.default()
-        intents.message_content = True  # 订阅消息内容事件 (Privileged)
-        intents.members = True  # 订阅成员事件 (Privileged)
+        if message_mode == "full_message":
+            intents.message_content = True  # 订阅消息内容事件 (Privileged)
+            intents.members = True  # 订阅成员事件 (Privileged)
 
         # 初始化Bot
         super().__init__(intents=intents, proxy=proxy)
@@ -97,9 +105,19 @@ class DiscordBotClient(discord.Bot):
         }
 
     async def on_message(self, message: discord.Message) -> None:
-        """当接收到消息时触发"""
+        """当接收到消息时触发。
+
+        slash command 不经此处（走 Pycord interaction 通道），故两种模式下都可用。
+        mention_and_dm 模式仅处理 @bot 或私信（无特权 intent 时 Discord 也会下发这两类消息的正文）。
+        """
         if message.author.bot and not self.allow_bot_messages:
             return
+
+        if self.message_mode != "full_message":
+            is_dm = message.guild is None
+            is_mention = bool(self.user and self.user in message.mentions)
+            if not (is_dm or is_mention):
+                return
 
         logger.debug(
             f"[Discord] Received raw message from {message.author.name}: {message.content}",

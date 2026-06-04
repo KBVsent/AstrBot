@@ -458,6 +458,7 @@ CONFIG_METADATA_2 = {
                         "enable": True,
                         "discord_token": "",
                         "discord_proxy": "",
+                        "discord_message_mode": "mention_and_dm",
                         "discord_command_register": True,
                         "discord_activity_name": "",
                         "discord_allow_bot_messages": False,
@@ -910,6 +911,15 @@ CONFIG_METADATA_2 = {
                         "description": "Discord 代理地址",
                         "type": "string",
                         "hint": "可选的代理地址：http://ip:port",
+                    },
+                    "discord_message_mode": {
+                        "description": "Discord 消息处理模式",
+                        "type": "string",
+                        "options": ["mention_and_dm", "full_message"],
+                        "default": "mention_and_dm",
+                        "hint": "mention_and_dm：仅处理 @机器人 和私信，无需特权 intent（推荐）；"
+                        "full_message：处理频道内所有消息，需在 Developer Portal 开启 "
+                        "MESSAGE CONTENT 与 SERVER MEMBERS 特权 intent。斜杠指令(slash command)两种模式下均可用。",
                     },
                     "discord_command_register": {
                         "description": "注册 Discord 指令",

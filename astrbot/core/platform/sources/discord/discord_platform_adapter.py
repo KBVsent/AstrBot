@@ -50,6 +50,11 @@ class DiscordPlatformAdapter(Platform):
         self.registered_handlers = []
         # 指令注册相关
         self.enable_command_register = self.config.get("discord_command_register", True)
+        # 消息模式：mention_and_dm（默认，零特权 intent）/ full_message（旧行为，需特权）。
+        # 旧实例存盘里没有该 key，必须写显式 fallback（DEFAULT_CONFIG.platform=[] 不会回填实例字段）。
+        self.message_mode = self.config.get("discord_message_mode", "mention_and_dm")
+        if self.message_mode not in ("mention_and_dm", "full_message"):
+            self.message_mode = "mention_and_dm"
         self.guild_id = self.config.get("discord_guild_id_for_debug", None)
         self.activity_name = self.config.get("discord_activity_name", None)
         self.shutdown_event = asyncio.Event()
@@ -143,7 +148,9 @@ class DiscordPlatformAdapter(Platform):
 
         proxy = self.config.get("discord_proxy") or None
         allow_bot_messages = bool(self.config.get("discord_allow_bot_messages"))
-        self.client = DiscordBotClient(token, proxy, allow_bot_messages)
+        self.client = DiscordBotClient(
+            token, proxy, allow_bot_messages, self.message_mode
+        )
         self.client.on_message_received = on_received
 
         async def callback() -> None:
@@ -162,8 +169,22 @@ class DiscordPlatformAdapter(Platform):
 
         self.client.on_ready_once_callback = callback
 
+        def _on_polling_done(task: asyncio.Task) -> None:
+            # start_polling 跑在独立 task 里，其异常（如特权 intent 未授权抛出的
+            # PrivilegedIntentsRequired、LoginFailure）不会冒泡到下面的 try/except，
+            # 不在此显式打日志就会被静默吞掉、适配器一直挂在 shutdown_event.wait()。
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    f"[Discord] Polling task exited unexpectedly: {exc}", exc_info=exc
+                )
+                self.shutdown_event.set()
+
         try:
             self._polling_task = asyncio.create_task(self.client.start_polling())
+            self._polling_task.add_done_callback(_on_polling_done)
             await self.shutdown_event.wait()
         except discord.errors.LoginFailure:
             logger.error(
@@ -308,8 +329,13 @@ class DiscordPlatformAdapter(Platform):
         if self.client.user in raw_message.mentions:
             is_mention = True
 
-        # Role Mention（Bot 拥有的角色被提及）
-        if not is_mention and raw_message.role_mentions:
+        # Role Mention（Bot 拥有的角色被提及）：依赖 members intent 解析 bot 角色，
+        # 仅 full_message 模式可用；其余模式无 members intent，跳过角色@唤醒。
+        if (
+            self.message_mode == "full_message"
+            and not is_mention
+            and raw_message.role_mentions
+        ):
             bot_member = None
             if raw_message.guild:
                 try:

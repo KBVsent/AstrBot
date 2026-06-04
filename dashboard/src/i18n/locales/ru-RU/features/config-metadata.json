@@ -434,6 +434,10 @@
                 "description": "Регистрировать слэш-команды Discord",
                 "hint": "Если включено, команды плагинов будут зарегистрированы как /команды Discord."
             },
+            "discord_message_mode": {
+                "description": "Режим обработки сообщений Discord",
+                "hint": "mention_and_dm: обрабатывать только сообщения с @упоминанием бота и личные сообщения, привилегированные intent не требуются (рекомендуется); full_message: обрабатывать все сообщения в каналах, требует включения привилегированных intent MESSAGE CONTENT и SERVER MEMBERS в Developer Portal. Слэш-команды работают в обоих режимах."
+            },
             "discord_proxy": {
                 "description": "Proxy URL для Discord",
                 "hint": "Формат: http://ip:port"

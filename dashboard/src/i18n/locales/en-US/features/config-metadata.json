@@ -434,6 +434,10 @@
         "description": "Register Discord slash commands",
         "hint": "When enabled, AstrBot will automatically register plugin commands as Discord slash commands"
       },
+      "discord_message_mode": {
+        "description": "Discord Message Mode",
+        "hint": "mention_and_dm: only handle messages that @mention the bot and DMs, no privileged intents required (recommended); full_message: handle all messages in channels, requires enabling the MESSAGE CONTENT and SERVER MEMBERS privileged intents in the Developer Portal. Slash commands work in both modes."
+      },
       "discord_proxy": {
         "description": "Discord Proxy URL",
         "hint": "Optional proxy URL: http://ip:port"
