@@ -12,6 +12,8 @@
   "noCommands": "暂无指令",
   "selectHint": "从左侧选择一条指令进行编辑",
   "enabled": "注册此指令",
+  "ephemeral": "私密响应",
+  "ephemeralHint": "开启后，本指令的斜杠响应仅触发者本人可见（ephemeral），其他人看不到。整次触发生效，适合绑定、隐私等敏感操作。仅对斜杠指令生效。",
   "commandKey": "指令名（路由键）",
   "commandKeyHint": "需与插件真实指令名一致才能正确路由；slash 名可另设",
   "keyRequired": "指令名不能为空",

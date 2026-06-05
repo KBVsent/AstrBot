@@ -301,6 +301,7 @@ class DiscordPlatformAdapter(Platform):
         message: AstrBotMessage,
         followup_webhook=None,
         user_locale: str | None = None,
+        ephemeral: bool = False,
     ) -> None:
         """处理消息"""
         message_event = DiscordPlatformEvent(
@@ -310,6 +311,7 @@ class DiscordPlatformAdapter(Platform):
             session_id=message.session_id,
             client=self.client,
             interaction_followup_webhook=followup_webhook,
+            is_ephemeral=ephemeral,
         )
 
         # slash interaction 自带用户客户端 locale，放进事件 extras 供业务侧做语言判定/seed。
@@ -469,10 +471,12 @@ class DiscordPlatformAdapter(Platform):
                 :100
             ]
             options = self._build_options(entry.get("options"))
+            # ephemeral 私密响应：per-trigger 静态位，defer 时刻锁定（事件还没进 pipeline）。
+            ephemeral = bool(entry.get("ephemeral", False))
 
             # 回调用底层指令名（注册表的键）构造 message_str，
             # 保证自定义 slash_name 也能路由回原指令。
-            callback = self._create_dynamic_callback(cmd_name, len(options))
+            callback = self._create_dynamic_callback(cmd_name, len(options), ephemeral)
 
             slash_kwargs: dict[str, Any] = {
                 "name": slash_name,
@@ -587,6 +591,7 @@ class DiscordPlatformAdapter(Platform):
                             "required": False,
                         },
                     ],
+                    "ephemeral": False,
                 }
         return schemas
 
@@ -693,11 +698,16 @@ class DiscordPlatformAdapter(Platform):
                 out[key] = value[:100]
         return out
 
-    def _create_dynamic_callback(self, command_name: str, option_count: int):
+    def _create_dynamic_callback(
+        self, command_name: str, option_count: int, ephemeral: bool = False
+    ):
         """为每个指令动态创建一个异步回调函数。
 
         command_name 为底层 AstrBot 指令名（注册表键），用于构造 message_str
         之后交给CommandFilter，即使 Discord 上的 slash 名被自定义，也能路由回原指令。
+
+        ephemeral 为 per-trigger 私密响应位（注册表静态声明）：True 时本次触发的 defer 与
+        全部 followup 都仅触发者可见。Discord 在 defer 时刻锁定该状态，故必须随注册一起静态传入。
 
         Pycord 用 options kwarg 注册时，会把每个 Option 按位置匹配到回调的具名参数并以该名回传值
         没有具名参数，多 Option 会触发 "Too many arguments passed to the options kwarg"。
@@ -712,8 +722,9 @@ class DiscordPlatformAdapter(Platform):
             # 1. 尝试立即响应，防止超时（移到最前面）
             followup_webhook = None
             try:
-                # 设定 2.5 秒超时，避免卡死整个 event loop
-                await asyncio.wait_for(ctx.defer(), timeout=2.5)
+                # 设定 2.5 秒超时，避免卡死整个 event loop。
+                # ephemeral 在此刻锁定：True → 本次 defer + 全部 followup 仅触发者可见。
+                await asyncio.wait_for(ctx.defer(ephemeral=ephemeral), timeout=2.5)
                 followup_webhook = ctx.followup
             except asyncio.TimeoutError:
                 logger.warning(
@@ -799,7 +810,9 @@ class DiscordPlatformAdapter(Platform):
             # 3. 将消息、webhook、用户 locale 交给 handle_msg 处理。
             # slash interaction 自带 ctx.locale，写入事件 extras；on_message 路径无此信息。
             user_locale = str(ctx.locale) if ctx.locale else None
-            await self.handle_msg(abm, followup_webhook, user_locale=user_locale)
+            await self.handle_msg(
+                abm, followup_webhook, user_locale=user_locale, ephemeral=ephemeral
+            )
 
         # 合成签名：ctx + arg0..argN-1，供 Pycord 把 Option 绑定到具名参数。
         # 实际仍由上面的 **kwargs 接收，运行时按 arg{i} 顺序取值。

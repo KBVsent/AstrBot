@@ -84,6 +84,16 @@
             <div class="d-flex align-center mb-4">
               <div class="text-h5 font-weight-medium">/{{ selected.slash_name || selected.key }}</div>
               <v-spacer></v-spacer>
+              <v-switch v-model="selected.ephemeral" color="primary" :label="tm('ephemeral')" hide-details inset
+                density="compact" class="mr-4">
+                <template v-slot:append>
+                  <v-tooltip :text="tm('ephemeralHint')" location="bottom" max-width="320">
+                    <template v-slot:activator="{ props: tip }">
+                      <v-icon v-bind="tip" size="small" color="medium-emphasis">mdi-help-circle-outline</v-icon>
+                    </template>
+                  </v-tooltip>
+                </template>
+              </v-switch>
               <v-switch v-model="selected.enabled" color="success" :label="tm('enabled')" hide-details inset
                 density="compact"></v-switch>
             </div>
@@ -277,6 +287,7 @@ function entryToModel(key, e) {
     _id: nextId(),
     key,
     enabled: e.enabled !== false,
+    ephemeral: !!e.ephemeral,
     slash_name: e.slash_name || key,
     description: e.description || '',
     locs: locsObjToArr(e.description_localizations),
@@ -299,6 +310,7 @@ function modelToSchema() {
     if (!key) continue
     out[key] = {
       enabled: c.enabled !== false,
+      ephemeral: !!c.ephemeral,
       slash_name: String(c.slash_name || key).trim(),
       description: c.description || '',
       description_localizations: locsArrToObj(c.locs),

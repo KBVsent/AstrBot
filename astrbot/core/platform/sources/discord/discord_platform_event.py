@@ -41,10 +41,13 @@ class DiscordPlatformEvent(AstrMessageEvent):
         session_id: str,
         client: DiscordBotClient,
         interaction_followup_webhook: discord.Webhook | None = None,
+        is_ephemeral: bool = False,
     ) -> None:
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.client = client
         self.interaction_followup_webhook = interaction_followup_webhook
+        # per-trigger 私密响应：True 时本次交互的全部 followup 仅触发者可见（与 defer 时锁定的状态一致）。
+        self.is_ephemeral = is_ephemeral
 
     async def send(self, message: MessageChain) -> None:
         """发送消息到Discord平台"""
@@ -80,6 +83,9 @@ class DiscordPlatformEvent(AstrMessageEvent):
         try:
             # -- 斜杠指令/交互上下文 --
             if self.interaction_followup_webhook:
+                # ephemeral 须逐条 followup 传入；defer 时已锁定该状态，多段结果保持一致私密。
+                if self.is_ephemeral:
+                    kwargs["ephemeral"] = True
                 await self.interaction_followup_webhook.send(**kwargs)
 
             # -- 常规消息上下文 --

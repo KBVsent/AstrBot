@@ -12,6 +12,8 @@
   "noCommands": "No commands",
   "selectHint": "Select a command on the left to edit",
   "enabled": "Register this command",
+  "ephemeral": "Ephemeral reply",
+  "ephemeralHint": "When on, this command's slash reply is visible only to the user who triggered it (ephemeral); others can't see it. Applies to the whole trigger — ideal for sensitive actions like binding or privacy. Slash commands only.",
   "commandKey": "Command name (routing key)",
   "commandKeyHint": "Must match the plugin's real command name to route correctly; the slash name can differ",
   "keyRequired": "Command name is required",
