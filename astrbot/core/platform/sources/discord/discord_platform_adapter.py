@@ -96,11 +96,11 @@ class DiscordPlatformAdapter(Platform):
             message_obj.type = self._get_message_type(channel)
             message_obj.group_id = self._get_channel_id(channel)
         else:
-            logger.warning(
-                f"[Discord] Can't get channel info for {channel_id_str}, will guess message type.",
+            logger.error(
+                f"[Discord] Proactive send failed: cannot resolve channel {channel_id_str} "
+                "(bot may not be in the guild, or the channel does not exist)."
             )
-            message_obj.type = MessageType.GROUP_MESSAGE
-            message_obj.group_id = session.session_id
+            return
 
         message_obj.message_str = message_chain.get_plain_text()
         message_obj.sender = MessageMember(
@@ -145,6 +145,14 @@ class DiscordPlatformAdapter(Platform):
             abm = await self.convert_message(data=message_data)
             await self.handle_msg(abm)
 
+        async def on_interaction_received(interaction_data) -> None:
+            # 组件交互（按钮 / select / modal 提交）入站：转 ABM 后进 pipeline。
+            logger.debug(f"[Discord] Interaction received: {interaction_data}")
+            if self.bot_self_id is None:
+                self.bot_self_id = interaction_data.get("bot_id")
+            abm = await self.convert_message(data=interaction_data)
+            await self.handle_msg(abm)
+
         # 初始化 Discord 客户端
         token = str(self.config.get("discord_token"))
         if not token:
@@ -159,6 +167,7 @@ class DiscordPlatformAdapter(Platform):
             token, proxy, allow_bot_messages, self.message_mode
         )
         self.client.on_message_received = on_received
+        self.client.on_interaction_received = on_interaction_received
 
         async def callback() -> None:
             try:
@@ -291,9 +300,45 @@ class DiscordPlatformAdapter(Platform):
         abm.message_id = str(message.id)
         return abm
 
+    def _convert_interaction_to_abm(self, data: dict) -> AstrBotMessage:
+        """将组件交互（按钮 / select / modal 提交）转换为 AstrBotMessage。
+
+        交互不靠文本路由，靠 custom_id；message_str 留空，由处理器
+        自行从 custom_id 改写。raw_message 设为 discord.Interaction，使事件的
+        is_button_interaction()/get_interaction_custom_id() 等生效。
+        """
+        interaction: discord.Interaction = data["interaction"]
+        channel = interaction.channel
+
+        abm = AstrBotMessage()
+        if channel is not None:
+            abm.type = self._get_message_type(channel, interaction.guild_id)
+            abm.group_id = self._get_channel_id(channel)
+        else:
+            abm.type = (
+                MessageType.GROUP_MESSAGE
+                if interaction.guild_id is not None
+                else MessageType.FRIEND_MESSAGE
+            )
+            abm.group_id = str(interaction.channel_id)
+
+        # 交互不靠文本路由（处理器读 custom_id），message_str/message 均留空——避免触发命令匹配
+        abm.message_str = ""
+        abm.message = []
+        abm.sender = MessageMember(
+            user_id=str(interaction.user.id) if interaction.user else "",
+            nickname=interaction.user.display_name if interaction.user else "",
+        )
+        abm.raw_message = interaction
+        abm.self_id = cast(str, self.bot_self_id)
+        abm.session_id = str(interaction.channel_id)
+        abm.message_id = str(interaction.id)
+        return abm
+
     async def convert_message(self, data: dict) -> AstrBotMessage:
-        """将平台消息转换成 AstrBotMessage"""
-        # 由于 on_interaction 已被禁用，我们只处理普通消息
+        """将平台消息转换成 AstrBotMessage（普通消息 / 组件交互两类）"""
+        if data.get("type") == "interaction":
+            return self._convert_interaction_to_abm(data)
         return self._convert_message_to_abm(data)
 
     async def handle_msg(
@@ -335,7 +380,13 @@ class DiscordPlatformAdapter(Platform):
             self.commit_event(message_event)
             return
 
-        # 2. 处理普通消息（提及检测）
+        # 2. 组件交互（按钮 / select / modal 提交）：raw_message 是 discord.Interaction。
+        if isinstance(message.raw_message, discord.Interaction):
+            message_event.is_wake = True
+            self.commit_event(message_event)
+            return
+
+        # 3. 处理普通消息（提及检测）
         # 确保 raw_message 是 discord.Message 类型，以便静态检查通过
         raw_message = message.raw_message
         if not isinstance(raw_message, discord.Message):

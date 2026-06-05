@@ -40,6 +40,8 @@ class DiscordBotClient(discord.Bot):
 
         # 回调函数
         self.on_message_received: Callable[[dict], Awaitable[None]] | None = None
+        # 组件交互（按钮 / select / modal 提交）回调；slash 仍走 Pycord 原生通道。
+        self.on_interaction_received: Callable[[dict], Awaitable[None]] | None = None
         self.on_ready_once_callback: Callable[[], Awaitable[None]] | None = None
         self._ready_once_fired = False
 
@@ -90,6 +92,7 @@ class DiscordBotClient(discord.Bot):
         if interaction.user is None:
             raise ValueError("Interaction received without a valid user")
 
+        raw_data = getattr(interaction, "data", {}) or {}
         return {
             "interaction": interaction,
             "bot_id": str(self.user.id),
@@ -102,7 +105,31 @@ class DiscordBotClient(discord.Bot):
             else None,
             "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
             "type": "interaction",
+            # custom_id：按钮 / select / modal 提交统一靠它路由
+            "custom_id": raw_data.get("custom_id", ""),
+            # select 菜单选中值
+            "values": raw_data.get("values", []),
+            # modal 提交：把各 InputText 扁平成 {input_custom_id: value}
+            "modal_values": self._extract_modal_values(interaction),
         }
+
+    @staticmethod
+    def _extract_modal_values(interaction: discord.Interaction) -> dict[str, str]:
+        """从 modal_submit 交互里提取各输入框的值，扁平成 {custom_id: value}。
+
+        Discord modal 的 data.components 是一组 action row，每个 row 内含一个 InputText 组件。
+        非 modal 交互返回空 dict。
+        """
+        if interaction.type != discord.InteractionType.modal_submit:
+            return {}
+        out: dict[str, str] = {}
+        raw_data = getattr(interaction, "data", {}) or {}
+        for row in raw_data.get("components", []) or []:
+            for comp in row.get("components", []) or []:
+                cid = comp.get("custom_id")
+                if cid is not None:
+                    out[cid] = comp.get("value", "")
+        return out
 
     async def on_message(self, message: discord.Message) -> None:
         """当接收到消息时触发。
@@ -126,6 +153,34 @@ class DiscordBotClient(discord.Bot):
         if self.on_message_received:
             message_data = self._create_message_data(message)
             await self.on_message_received(message_data)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """处理交互。
+
+        - component（按钮 / select）/ modal_submit → 路由进 pipeline（统一靠 custom_id）。
+        - application_command（slash）/ autocomplete → 交回 Pycord 原生处理，不破坏现有 slash。
+
+        关键事实：Pycord 收到 component 交互时既派发内部 View store 又触发本事件，故无需注册
+        持久 View 回调，统一在此路由即可。
+        """
+        if interaction.type in (
+            discord.InteractionType.component,
+            discord.InteractionType.modal_submit,
+        ):
+            if self.on_interaction_received:
+                try:
+                    interaction_data = self._create_interaction_data(interaction)
+                except Exception as e:
+                    logger.error(
+                        f"[Discord] Failed to build interaction data: {e}",
+                        exc_info=True,
+                    )
+                    return
+                await self.on_interaction_received(interaction_data)
+            return
+
+        # slash / autocomplete 等仍走 Pycord 原生命令处理
+        await self.process_application_commands(interaction)
 
     def _extract_interaction_content(self, interaction: discord.Interaction) -> str:
         """从交互中提取内容"""
