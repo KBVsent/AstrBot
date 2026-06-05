@@ -11,7 +11,7 @@ from discord.channel import DMChannel
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import File, Image, Plain
+from astrbot.api.message_components import At, File, Image, Plain
 from astrbot.api.platform import (
     AstrBotMessage,
     MessageMember,
@@ -228,34 +228,37 @@ class DiscordPlatformAdapter(Platform):
         message = data["message"]
 
         content = message.content
+        bot_id = self.client.user.id if self.client and self.client.user else None
 
-        # 如果机器人被@，移除@部分
-        # 剥离 User Mention (<@id>, <@!id>)
-        if self.client and self.client.user:
-            mention_str = f"<@{self.client.user.id}>"
-            mention_str_nickname = f"<@!{self.client.user.id}>"
-            if content.startswith(mention_str):
-                content = content[len(mention_str) :].lstrip()
-            elif content.startswith(mention_str_nickname):
-                content = content[len(mention_str_nickname) :].lstrip()
+        # 解析正文里的用户 @：按出现顺序、不去重转成 Comp.At（与 slash USER 选项语义一致），
+        # 让插件能从消息链拿到 @ 目标。bot 自己的 @（mention_and_dm 模式的唤醒触发）
+        # 只从文本剥除、不建 At——否则会把 bot 误当成目标。
+        at_components: list[At] = []
+        for match in re.finditer(r"<@!?(\d+)>", content):
+            mid = match.group(1)
+            if bot_id is not None and int(mid) == bot_id:
+                continue
+            at_components.append(At(qq=mid))
 
-        # 剥离 Role Mention（bot 拥有的任一角色被提及，<@&role_id>）
+        # 剥离全部用户 mention 标记（含 bot 与他人），避免雪花 ID 污染位置参数
+        content = re.sub(r"<@!?\d+>", "", content)
+
+        # 剥离 Role Mention（bot 拥有的任一角色被提及，<@&role_id>）：角色@仅用于唤醒，不转 At，
+        # 仅从文本清理 bot 角色 mention（角色@唤醒，full_message 模式）。
         if (
             hasattr(message, "role_mentions")
             and hasattr(message, "guild")
             and message.guild
+            and self.client
+            and self.client.user
         ):
-            bot_member = (
-                message.guild.get_member(self.client.user.id)
-                if self.client and self.client.user
-                else None
-            )
+            bot_member = message.guild.get_member(self.client.user.id)
             if bot_member and hasattr(bot_member, "roles"):
                 for role in bot_member.roles:
-                    role_mention_str = f"<@&{role.id}>"
-                    if content.startswith(role_mention_str):
-                        content = content[len(role_mention_str) :].lstrip()
-                        break  # 只剥离第一个匹配的角色 mention
+                    content = content.replace(f"<@&{role.id}>", "")
+
+        # 收敛多余空格
+        content = re.sub(r"\s{2,}", " ", content).strip()
 
         abm = AstrBotMessage()
         abm.type = self._get_message_type(message.channel)
@@ -268,6 +271,7 @@ class DiscordPlatformAdapter(Platform):
         message_chain = []
         if abm.message_str:
             message_chain.append(Plain(text=abm.message_str))
+        message_chain.extend(at_components)
         if message.attachments:
             for attachment in message.attachments:
                 if attachment.content_type and attachment.content_type.startswith(
@@ -568,6 +572,7 @@ class DiscordPlatformAdapter(Platform):
                         {
                             "name": "params",
                             "description": "指令的所有参数",
+                            "type": "string",
                             "description_localizations": {},
                             "required": False,
                         },
@@ -602,7 +607,25 @@ class DiscordPlatformAdapter(Platform):
             )
 
     def _build_options(self, raw_options: Any) -> list[discord.Option]:
-        """从注册表条目的 options 构造 Discord string 选项；缺省时给单个通用 params 选项。"""
+        """从注册表条目的 options 构造 Discord 选项；缺省时给单个通用 params 选项。
+
+        作为框架能力，支持 Discord 全部参数类型（见 ``type_map``）。触发时回调按值的实际类型
+        通用地映射进 AstrBot 消息模型（见 ``_create_dynamic_callback``）：标量入 message_str
+        文本、user→``Comp.At``、attachment→``Image``/``File``、channel/role→Discord mention 文本。
+        未知 type 告警回退 string。
+        """
+        # type 字段 → Discord 选项类型（覆盖全部可作参数的类型，scope 约定局部定义）
+        type_map = {
+            "string": discord.SlashCommandOptionType.string,
+            "integer": discord.SlashCommandOptionType.integer,
+            "number": discord.SlashCommandOptionType.number,
+            "boolean": discord.SlashCommandOptionType.boolean,
+            "user": discord.SlashCommandOptionType.user,
+            "channel": discord.SlashCommandOptionType.channel,
+            "role": discord.SlashCommandOptionType.role,
+            "mentionable": discord.SlashCommandOptionType.mentionable,
+            "attachment": discord.SlashCommandOptionType.attachment,
+        }
         specs = (
             raw_options
             if isinstance(raw_options, list) and raw_options
@@ -623,16 +646,24 @@ class DiscordPlatformAdapter(Platform):
                 continue
             if name in names:
                 continue
+            opt_type = str(spec.get("type") or "string").strip().lower()
+            if opt_type not in type_map:
+                logger.warning(
+                    f"[Discord] Option '{name}': unknown type {opt_type!r}, "
+                    "falling back to 'string'."
+                )
+                opt_type = "string"
             opt_kwargs: dict[str, Any] = {
                 "name": name,
                 "description": (str(spec.get("description") or name))[:100],
-                "type": discord.SlashCommandOptionType.string,
                 "required": bool(spec.get("required", False)),
             }
             loc = self._filter_localizations(spec.get("description_localizations"))
             if loc:
                 opt_kwargs["description_localizations"] = loc
-            options.append(discord.Option(**opt_kwargs))
+            # input_type 是 discord.Option 的仅位置参数（签名 `/` 之前），必须位置传入；
+            # 用 type=/input_type= 关键字会被丢进 **kwargs 忽略、退回默认 string。
+            options.append(discord.Option(type_map[opt_type], **opt_kwargs))
             names.add(name)
         return options
 
@@ -685,17 +716,48 @@ class DiscordPlatformAdapter(Platform):
                 )
                 return
 
-            # 按声明顺序拼接参数值，构造通用 CommandFilter 可解析的指令字符串
+            # 按声明顺序处理各参数值，通用映射进 AstrBot 消息模型（不绑定具体插件用法）：
+            #   - User/Member  → Comp.At（@ 提及，与 on_message 路径语义一致）
+            #   - Attachment   → Image（图片）/ File（其他）
+            #   - Role/Channel → Discord mention 文本（<@&id> / <#id>），信息保留进 message_str
+            #   - 标量(str/int/float/bool) → 文本进 message_str；CommandFilter 再按 handler 签名转型
+            # 非标量进消息链 component，标量进位置文本串。
             parts = [command_name]
+            extra_components: list[Any] = []
             for pname in param_names:
                 value = kwargs.get(pname)
-                if value:
-                    parts.append(str(value))
+                if value is None:
+                    continue
+                if isinstance(value, (discord.User, discord.Member)):
+                    extra_components.append(
+                        At(qq=str(value.id), name=value.display_name)
+                    )
+                elif isinstance(value, discord.Attachment):
+                    if (value.content_type or "").startswith("image/"):
+                        extra_components.append(
+                            Image(file=value.url, filename=value.filename)
+                        )
+                    else:
+                        extra_components.append(
+                            File(name=value.filename, url=value.url)
+                        )
+                elif isinstance(value, discord.Role):
+                    parts.append(f"<@&{value.id}>")
+                elif isinstance(value, (GuildChannel, discord.Thread, PrivateChannel)):
+                    parts.append(f"<#{value.id}>")
+                elif isinstance(value, discord.Object):
+                    parts.append(str(value.id))
+                else:
+                    # 标量：保留 0 / False，仅跳过空字符串
+                    text = str(value)
+                    if text != "":
+                        parts.append(text)
             message_str_for_filter = " ".join(parts)
 
             logger.debug(
                 f"[Discord] Slash command '{command_name}' triggered. "
-                f"Options: {kwargs}. Built command string: '{message_str_for_filter}'",
+                f"Options: {kwargs}. Built command string: '{message_str_for_filter}'"
+                f"{f', +{len(extra_components)} component(s)' if extra_components else ''}",
             )
 
             # 2. 构建 AstrBotMessage
@@ -718,7 +780,7 @@ class DiscordPlatformAdapter(Platform):
                 user_id=str(ctx.author.id),
                 nickname=ctx.author.display_name,
             )
-            abm.message = [Plain(text=message_str_for_filter)]
+            abm.message = [Plain(text=message_str_for_filter), *extra_components]
             abm.raw_message = ctx.interaction
             abm.self_id = cast(str, self.bot_self_id)
             abm.session_id = str(ctx.channel_id)

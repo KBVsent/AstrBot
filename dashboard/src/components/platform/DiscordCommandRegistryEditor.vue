@@ -138,7 +138,9 @@
                   <div class="d-flex ga-2 align-center">
                     <v-chip size="x-small" label color="primary" variant="tonal">#{{ oi + 1 }}</v-chip>
                     <v-text-field v-model="opt.name" :label="tm('optionName')" density="compact" variant="outlined"
-                      hide-details style="max-width: 200px" :error-messages="optionNameErrors(selected, oi)"></v-text-field>
+                      hide-details style="max-width: 180px" :error-messages="optionNameErrors(selected, oi)"></v-text-field>
+                    <v-select v-model="opt.type" :items="optionTypeItems" :label="tm('optionType')" density="compact"
+                      variant="outlined" hide-details style="max-width: 130px"></v-select>
                     <v-text-field v-model="opt.description" :label="tm('description')" density="compact"
                       variant="outlined" hide-details maxlength="100"></v-text-field>
                     <v-switch v-model="opt.required" color="primary" :label="tm('required')" hide-details inset
@@ -233,6 +235,12 @@ const VALID_LOCALES = [
   'uk', 'hi', 'th', 'zh-CN', 'ja', 'zh-TW', 'ko',
 ]
 const SLASH_RE = /^[a-z0-9_-]{1,32}$/
+// option type：与适配器 _build_options 的 type_map 对齐（Discord 全部参数类型）。
+// 触发时：标量(string/integer/number/boolean)扁平进位置参数；user→At；attachment→Image/File；
+// channel/role→Discord mention 文本。
+const OPTION_TYPES = [
+  'string', 'integer', 'number', 'boolean', 'user', 'channel', 'role', 'mentionable', 'attachment',
+]
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -276,6 +284,7 @@ function entryToModel(key, e) {
       ? e.options.filter((o) => o && typeof o === 'object').map((o) => ({
           name: o.name || '',
           description: o.description || '',
+          type: OPTION_TYPES.includes(o.type) ? o.type : 'string',
           required: !!o.required,
           locs: locsObjToArr(o.description_localizations),
         }))
@@ -296,6 +305,7 @@ function modelToSchema() {
       options: c.options.map((o) => ({
         name: String(o.name || '').trim(),
         description: o.description || '',
+        type: OPTION_TYPES.includes(o.type) ? o.type : 'string',
         description_localizations: locsArrToObj(o.locs),
         required: !!o.required,
       })),
@@ -336,6 +346,18 @@ function open() {
   load()
   dialog.value = true
 }
+
+const optionTypeItems = computed(() => [
+  { title: tm('typeString'), value: 'string' },
+  { title: tm('typeInteger'), value: 'integer' },
+  { title: tm('typeNumber'), value: 'number' },
+  { title: tm('typeBoolean'), value: 'boolean' },
+  { title: tm('typeUser'), value: 'user' },
+  { title: tm('typeChannel'), value: 'channel' },
+  { title: tm('typeRole'), value: 'role' },
+  { title: tm('typeMentionable'), value: 'mentionable' },
+  { title: tm('typeAttachment'), value: 'attachment' },
+])
 
 const selected = computed(() => editModel.value.find((c) => c._id === selectedId.value) || null)
 const enabledCount = computed(() => editModel.value.filter((c) => c.enabled !== false).length)
@@ -417,7 +439,13 @@ function addLoc(arr) {
   arr.push({ locale: next, text: '' })
 }
 function addOption(c) {
-  c.options.push({ name: `arg${c.options.length}`, description: '', required: false, locs: [] })
+  c.options.push({
+    name: `arg${c.options.length}`,
+    description: '',
+    type: 'string',
+    required: false,
+    locs: [],
+  })
 }
 function moveOption(c, idx, dir) {
   const j = idx + dir
