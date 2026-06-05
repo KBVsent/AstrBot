@@ -296,7 +296,12 @@ class DiscordPlatformAdapter(Platform):
         # 由于 on_interaction 已被禁用，我们只处理普通消息
         return self._convert_message_to_abm(data)
 
-    async def handle_msg(self, message: AstrBotMessage, followup_webhook=None) -> None:
+    async def handle_msg(
+        self,
+        message: AstrBotMessage,
+        followup_webhook=None,
+        user_locale: str | None = None,
+    ) -> None:
         """处理消息"""
         message_event = DiscordPlatformEvent(
             message_str=message.message_str,
@@ -306,6 +311,11 @@ class DiscordPlatformAdapter(Platform):
             client=self.client,
             interaction_followup_webhook=followup_webhook,
         )
+
+        # slash interaction 自带用户客户端 locale，放进事件 extras 供业务侧做语言判定/seed。
+        # on_message（@bot/DM）路径无此信息，user_locale 为 None 不写。
+        if user_locale:
+            message_event.set_extra("user_locale", user_locale)
 
         if self.client.user is None:
             logger.error(
@@ -786,8 +796,10 @@ class DiscordPlatformAdapter(Platform):
             abm.session_id = str(ctx.channel_id)
             abm.message_id = str(ctx.interaction.id)
 
-            # 3. 将消息和 webhook 分别交给 handle_msg 处理
-            await self.handle_msg(abm, followup_webhook)
+            # 3. 将消息、webhook、用户 locale 交给 handle_msg 处理。
+            # slash interaction 自带 ctx.locale，写入事件 extras；on_message 路径无此信息。
+            user_locale = str(ctx.locale) if ctx.locale else None
+            await self.handle_msg(abm, followup_webhook, user_locale=user_locale)
 
         # 合成签名：ctx + arg0..argN-1，供 Pycord 把 Option 绑定到具名参数。
         # 实际仍由上面的 **kwargs 接收，运行时按 arg{i} 顺序取值。
