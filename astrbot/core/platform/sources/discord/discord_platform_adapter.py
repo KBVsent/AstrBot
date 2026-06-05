@@ -1,4 +1,6 @@
 import asyncio
+import inspect
+import json
 import re
 import sys
 from typing import Any, cast
@@ -32,6 +34,10 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import override
 
+from discord.commands.core import valid_locales as _DISCORD_VALID_LOCALES
+
+_DISCORD_VALID_LOCALE_SET = frozenset(_DISCORD_VALID_LOCALES)
+
 
 # 注册平台适配器
 @register_platform_adapter(
@@ -55,7 +61,8 @@ class DiscordPlatformAdapter(Platform):
         self.message_mode = self.config.get("discord_message_mode", "mention_and_dm")
         if self.message_mode not in ("mention_and_dm", "full_message"):
             self.message_mode = "mention_and_dm"
-        self.guild_id = self.config.get("discord_guild_id_for_debug", None)
+        # 空字符串（schema 默认）按"无调试服务器"处理，走全局注册
+        self.guild_id = self.config.get("discord_guild_id_for_debug") or None
         self.activity_name = self.config.get("discord_activity_name", None)
         self.shutdown_event = asyncio.Event()
         self._polling_task = None
@@ -404,50 +411,83 @@ class DiscordPlatformAdapter(Platform):
         self.registered_handlers.append(handler_info)
 
     async def _collect_and_register_commands(self) -> None:
-        """收集所有指令并注册到Discord"""
-        logger.info("[Discord] Collecting and registering slash commands...")
-        registered_commands = []
+        """按指令注册表（discord_command_schemas）注册斜杠指令。
 
-        for handler_md in star_handlers_registry:
-            if not star_map[handler_md.handler_module_path].activated:
-                continue
-            if not handler_md.enabled:
-                continue
-            for event_filter in handler_md.event_filters:
-                cmd_info = self._extract_command_info(event_filter, handler_md)
-                if not cmd_info:
-                    continue
+        注册表为空时自动发现全部已激活指令并持久化（仅一次），之后保留用户编辑。
+        """
+        schemas = self._load_or_seed_command_schemas()
+        if schemas is None:
+            # JSON 解析失败，已记录日志；中止注册，避免破坏用户数据。
+            return
+        if not schemas:
+            logger.info(
+                "[Discord] Command schema table is empty; no slash commands registered."
+            )
+            return
 
-                cmd_name, description, cmd_filter_instance = cmd_info
+        logger.info("[Discord] Registering slash commands from schema table...")
+        registered_commands: list[str] = []
+        used_slash_names: set[str] = set()
 
-                # 创建动态回调
-                callback = self._create_dynamic_callback(cmd_name)
-
-                # 创建一个通用的参数选项来接收所有文本输入
-                options = [
-                    discord.Option(
-                        name="params",
-                        description="指令的所有参数",
-                        type=discord.SlashCommandOptionType.string,
-                        required=False,
-                    ),
-                ]
-
-                # 创建SlashCommand
-                slash_command = discord.SlashCommand(
-                    name=cmd_name,
-                    description=description,
-                    func=callback,
-                    options=options,
-                    guild_ids=[self.guild_id] if self.guild_id else None,
+        for cmd_name, entry in schemas.items():
+            if not isinstance(entry, dict):
+                logger.warning(
+                    f"[Discord] Skipping schema entry '{cmd_name}': not a JSON object."
                 )
-                self.client.add_application_command(slash_command)
-                registered_commands.append(cmd_name)
+                continue
+            if not entry.get("enabled", True):
+                continue
+
+            slash_name = str(entry.get("slash_name") or cmd_name).strip()
+            if not re.match(r"^[a-z0-9_-]{1,32}$", slash_name):
+                logger.warning(
+                    f"[Discord] Skipping '{cmd_name}': invalid slash name '{slash_name}' "
+                    "(must match ^[a-z0-9_-]{1,32}$)."
+                )
+                continue
+            if slash_name in used_slash_names:
+                logger.warning(
+                    f"[Discord] Skipping '{cmd_name}': duplicate slash name '{slash_name}'."
+                )
+                continue
+
+            description = (str(entry.get("description") or f"Command: {cmd_name}"))[
+                :100
+            ]
+            options = self._build_options(entry.get("options"))
+
+            # 回调用底层指令名（注册表的键）构造 message_str，
+            # 保证自定义 slash_name 也能路由回原指令。
+            callback = self._create_dynamic_callback(cmd_name, len(options))
+
+            slash_kwargs: dict[str, Any] = {
+                "name": slash_name,
+                "description": description,
+                "func": callback,
+                "options": options,
+                "guild_ids": [self.guild_id] if self.guild_id else None,
+            }
+            desc_localizations = self._filter_localizations(
+                entry.get("description_localizations")
+            )
+            if desc_localizations:
+                slash_kwargs["description_localizations"] = desc_localizations
+
+            self.client.add_application_command(discord.SlashCommand(**slash_kwargs))
+            used_slash_names.add(slash_name)
+            registered_commands.append(slash_name)
 
         if registered_commands:
             logger.info(
-                f"[Discord] Ready to sync {len(registered_commands)} commands: {', '.join(registered_commands)}",
+                f"[Discord] Ready to sync {len(registered_commands)} commands: "
+                f"{', '.join(registered_commands)}",
             )
+            if len(registered_commands) > 100 and not self.guild_id:
+                logger.warning(
+                    "[Discord] More than 100 global slash commands configured; Discord "
+                    "caps global commands at 100. Disable unneeded ones via "
+                    "'enabled': false in discord_command_schemas, or set a debug guild ID.",
+                )
         else:
             logger.info("[Discord] No commands found for registration.")
 
@@ -470,39 +510,192 @@ class DiscordPlatformAdapter(Platform):
     def _is_daily_command_quota_error(error: discord.HTTPException) -> bool:
         return getattr(error, "code", None) == 30034
 
-    def _create_dynamic_callback(self, cmd_name: str):
-        """为每个指令动态创建一个异步回调函数"""
+    def _load_or_seed_command_schemas(self) -> dict | None:
+        """读取指令注册表；为空则自动发现全部指令、播种并持久化。
+
+        返回注册表 dict；JSON 非法或结构错误时返回 None（中止注册，不动用户数据）。
+        """
+        raw = self.config.get("discord_command_schemas") or ""
+        if not raw.strip():
+            seeded = self._discover_default_schemas()
+            self._persist_seeded_schemas(seeded)
+            return seeded
+
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"[Discord] Failed to parse discord_command_schemas JSON: {e}. "
+                "Registration aborted; your config is left untouched.",
+            )
+            return None
+        if not isinstance(data, dict):
+            logger.error(
+                "[Discord] discord_command_schemas must be a JSON object keyed by "
+                "command name. Registration aborted.",
+            )
+            return None
+        return data
+
+    @staticmethod
+    def _discover_default_schemas() -> dict:
+        """发现全部已激活插件指令，生成默认注册表（每条=启用、slash 名=指令名、单 string 参数）。
+
+        无实例状态依赖（只走全局 registry），声明为 staticmethod 便于 WebUI 路由在没有
+        运行中适配器实例时也能调用（如平台被禁用）。
+        """
+        schemas: dict[str, dict] = {}
+        for handler_md in star_handlers_registry:
+            if not star_map[handler_md.handler_module_path].activated:
+                continue
+            if not handler_md.enabled:
+                continue
+            for event_filter in handler_md.event_filters:
+                cmd_info = DiscordPlatformAdapter._extract_command_info(
+                    event_filter, handler_md
+                )
+                if not cmd_info:
+                    continue
+                cmd_name, description, _ = cmd_info
+                if cmd_name in schemas:
+                    continue  # 同名指令多个 handler，首个为准
+                schemas[cmd_name] = {
+                    "enabled": True,
+                    "slash_name": cmd_name,
+                    "description": description,
+                    "description_localizations": {},
+                    "options": [
+                        {
+                            "name": "params",
+                            "description": "指令的所有参数",
+                            "description_localizations": {},
+                            "required": False,
+                        },
+                    ],
+                }
+        return schemas
+
+    def _persist_seeded_schemas(self, schemas: dict) -> None:
+        """把播种出的注册表写回配置并持久化到 data/cmd_config.json。"""
+        self.config["discord_command_schemas"] = json.dumps(
+            schemas, ensure_ascii=False, indent=2
+        )
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+                logger.info(
+                    f"[Discord] Seeded {len(schemas)} commands into "
+                    "discord_command_schemas and saved config. Edit it in the WebUI to "
+                    "customize slash names / descriptions / localizations.",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Seeded commands but failed to persist config: {e}. "
+                    "Edits this run are in-memory only.",
+                )
+        else:
+            logger.warning(
+                "[Discord] Seeded commands in-memory only (config object unavailable); "
+                "they won't persist across restarts.",
+            )
+
+    def _build_options(self, raw_options: Any) -> list[discord.Option]:
+        """从注册表条目的 options 构造 Discord string 选项；缺省时给单个通用 params 选项。"""
+        specs = (
+            raw_options
+            if isinstance(raw_options, list) and raw_options
+            else [
+                {"name": "params", "description": "指令的所有参数", "required": False}
+            ]
+        )
+        options: list[discord.Option] = []
+        names: set[str] = set()
+        for spec in specs:
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("name") or "").strip()
+            if not re.match(r"^[a-z0-9_-]{1,32}$", name):
+                logger.warning(
+                    f"[Discord] Skipping option with invalid name: {spec.get('name')!r}"
+                )
+                continue
+            if name in names:
+                continue
+            opt_kwargs: dict[str, Any] = {
+                "name": name,
+                "description": (str(spec.get("description") or name))[:100],
+                "type": discord.SlashCommandOptionType.string,
+                "required": bool(spec.get("required", False)),
+            }
+            loc = self._filter_localizations(spec.get("description_localizations"))
+            if loc:
+                opt_kwargs["description_localizations"] = loc
+            options.append(discord.Option(**opt_kwargs))
+            names.add(name)
+        return options
+
+    @staticmethod
+    def _filter_localizations(raw: Any) -> dict[str, str]:
+        """过滤本地化字典到合法 Discord locale 码，非法键告警并丢弃。"""
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in raw.items():
+            if key not in _DISCORD_VALID_LOCALE_SET:
+                logger.warning(
+                    f"[Discord] Ignoring unknown Discord locale code in localizations: {key!r}"
+                )
+                continue
+            if isinstance(value, str) and value.strip():
+                out[key] = value[:100]
+        return out
+
+    def _create_dynamic_callback(self, command_name: str, option_count: int):
+        """为每个指令动态创建一个异步回调函数。
+
+        command_name 为底层 AstrBot 指令名（注册表键），用于构造 message_str
+        之后交给CommandFilter，即使 Discord 上的 slash 名被自定义，也能路由回原指令。
+
+        Pycord 用 options kwarg 注册时，会把每个 Option 按位置匹配到回调的具名参数并以该名回传值
+        没有具名参数，多 Option 会触发 "Too many arguments passed to the options kwarg"。
+        因此给回调挂一个合成 __signature__：ctx + arg0..argN-1，让 Pycord 把 N 个 Option
+        分别绑定到 arg0..；运行时仍由 **kwargs 接收，再按 arg{i} 顺序取值。
+        """
+        param_names = [f"arg{i}" for i in range(option_count)]
 
         async def dynamic_callback(
-            ctx: discord.ApplicationContext, params: str | None = None
+            ctx: discord.ApplicationContext, **kwargs: Any
         ) -> None:
-            # 1. 嘗試立即响应，防止超时 (移到最前面)
+            # 1. 尝试立即响应，防止超时（移到最前面）
             followup_webhook = None
             try:
-                # 設定 2.5 秒超時，避免卡死整個 event loop
+                # 设定 2.5 秒超时，避免卡死整个 event loop
                 await asyncio.wait_for(ctx.defer(), timeout=2.5)
                 followup_webhook = ctx.followup
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"[Discord] Defer command '{cmd_name}' timeout. Network might be too slow."
+                    f"[Discord] Defer command '{command_name}' timeout. Network might be too slow."
                 )
                 return
             except Exception as e:
-                logger.warning(f"[Discord] Failed to defer command '{cmd_name}': {e}")
+                logger.warning(
+                    f"[Discord] Failed to defer command '{command_name}': {e}"
+                )
                 return
 
-            # 将平台特定的前缀'/'剥离，以适配通用的CommandFilter
-            logger.debug(f"[Discord] Callback triggered: {cmd_name}")
-            logger.debug(f"[Discord] Callback context: {ctx}")
-            logger.debug(f"[Discord] Callback params: {params}")
-            message_str_for_filter = cmd_name
-            if params:
-                message_str_for_filter += f" {params}"
+            # 按声明顺序拼接参数值，构造通用 CommandFilter 可解析的指令字符串
+            parts = [command_name]
+            for pname in param_names:
+                value = kwargs.get(pname)
+                if value:
+                    parts.append(str(value))
+            message_str_for_filter = " ".join(parts)
 
             logger.debug(
-                f"[Discord] Slash command '{cmd_name}' triggered. "
-                f"Raw params: '{params}'. "
-                f"Built command string: '{message_str_for_filter}'",
+                f"[Discord] Slash command '{command_name}' triggered. "
+                f"Options: {kwargs}. Built command string: '{message_str_for_filter}'",
             )
 
             # 2. 构建 AstrBotMessage
@@ -533,6 +726,19 @@ class DiscordPlatformAdapter(Platform):
 
             # 3. 将消息和 webhook 分别交给 handle_msg 处理
             await self.handle_msg(abm, followup_webhook)
+
+        # 合成签名：ctx + arg0..argN-1，供 Pycord 把 Option 绑定到具名参数。
+        # 实际仍由上面的 **kwargs 接收，运行时按 arg{i} 顺序取值。
+        sig_params = [inspect.Parameter("ctx", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        for pname in param_names:
+            sig_params.append(
+                inspect.Parameter(
+                    pname,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=None,
+                )
+            )
+        dynamic_callback.__signature__ = inspect.Signature(sig_params)  # type: ignore[attr-defined]
 
         return dynamic_callback
 

@@ -460,6 +460,8 @@ CONFIG_METADATA_2 = {
                         "discord_proxy": "",
                         "discord_message_mode": "mention_and_dm",
                         "discord_command_register": True,
+                        "discord_command_schemas": "",
+                        "discord_guild_id_for_debug": "",
                         "discord_activity_name": "",
                         "discord_allow_bot_messages": False,
                     },
@@ -923,8 +925,20 @@ CONFIG_METADATA_2 = {
                     },
                     "discord_command_register": {
                         "description": "注册 Discord 指令",
-                        "hint": "启用后，自动将插件指令注册为 Discord 斜杠指令",
+                        "hint": "启用后，按下方「指令注册表」将插件指令注册为 Discord 斜杠指令。关闭则不注册任何斜杠指令。",
                         "type": "bool",
+                    },
+                    "discord_command_schemas": {
+                        "description": "Discord 指令注册表",
+                        "type": "string",
+                        "_special": "discord_command_registry",
+                        "hint": "点「编辑指令表」打开可视化编辑器，管理哪些插件指令注册为斜杠指令。留空时启动自动填入全部指令。",
+                    },
+                    "discord_guild_id_for_debug": {
+                        "description": "指令同步调试服务器 ID",
+                        "type": "string",
+                        "hint": "填入某个 Discord 服务器(Guild) ID 后，斜杠指令仅注册到该服务器并近乎即时同步，便于调试。"
+                        "留空则按全局注册，全局同步最长约 1 小时生效。",
                     },
                     "discord_activity_name": {
                         "description": "Discord 活动名称",

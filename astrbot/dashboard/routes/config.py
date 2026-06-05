@@ -404,6 +404,7 @@ class ConfigRoute(Route):
             "/config/platform/update": ("POST", self.post_update_platform),
             "/config/platform/delete": ("POST", self.post_delete_platform),
             "/config/platform/list": ("GET", self.get_platform_list),
+            "/config/platform/discover-commands": ("GET",self.get_discord_discoverable_commands),
             "/config/provider/new": ("POST", self.post_new_provider),
             "/config/provider/update": ("POST", self.post_update_provider),
             "/config/provider/delete": ("POST", self.post_delete_provider),
@@ -1048,6 +1049,23 @@ class ConfigRoute(Route):
         for platform in self.config["platform"]:
             platform_list.append(platform)
         return Response().ok({"platforms": platform_list}).__dict__
+
+    async def get_discord_discoverable_commands(self):
+        """发现当前可注册为 Discord 斜杠指令的插件指令，供注册表编辑器「添加/同步」。
+
+        返回的是默认注册表（键=指令名，值=默认条目），与适配器自动播种产物同形状。
+        无实例状态依赖，平台被禁用时也可用。
+        """
+        try:
+            from astrbot.core.platform.sources.discord.discord_platform_adapter import (
+                DiscordPlatformAdapter,
+            )
+
+            schemas = DiscordPlatformAdapter._discover_default_schemas()
+            return Response().ok({"schemas": schemas}).__dict__
+        except Exception as e:
+            logger.error(f"发现 Discord 可注册指令失败: {e}", exc_info=True)
+            return Response().error(str(e)).__dict__
 
     async def post_astrbot_configs(self):
         data = await request.json

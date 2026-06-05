@@ -432,7 +432,15 @@
       },
       "discord_command_register": {
         "description": "Register Discord slash commands",
-        "hint": "When enabled, AstrBot will automatically register plugin commands as Discord slash commands"
+        "hint": "When enabled, registers plugin commands as Discord slash commands according to the 'Command Registry' below. When disabled, no slash commands are registered."
+      },
+      "discord_command_schemas": {
+        "description": "Discord Command Registry",
+        "hint": "Click 'Edit Command Registry' to open the visual editor and manage which plugin commands register as slash commands. Auto-filled with all commands on first startup when empty."
+      },
+      "discord_guild_id_for_debug": {
+        "description": "Debug Guild ID for Command Sync",
+        "hint": "When set to a Discord guild (server) ID, slash commands are registered only to that guild and sync almost instantly, which is handy for debugging. Leave empty to register globally; global sync can take up to ~1 hour to propagate."
       },
       "discord_message_mode": {
         "description": "Discord Message Mode",
