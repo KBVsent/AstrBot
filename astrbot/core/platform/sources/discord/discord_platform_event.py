@@ -140,6 +140,67 @@ class DiscordPlatformEvent(AstrMessageEvent):
         await super().send(message)
         return str(sent_message.id) if sent_message else None
 
+    async def send_ephemeral(self, message: MessageChain) -> str | None:
+        """发送仅触发者可见的 ephemeral 消息，仅交互事件可用。
+
+        交互未响应时作为首响应发送；已 defer/响应时走 followup。
+        成功后，本事件后续 ``send()`` 会自动改走 ephemeral followup，避免私密确认后又公开发频道。
+
+        返回 Discord 暴露的消息 id；ephemeral 不是普通频道消息，不能用 ``edit_message(id)`` 编辑。
+        如需改写私密气泡，应在气泡内组件再次触发时调用 ``edit_message("origin")``。
+        """
+        interaction = self.message_obj.raw_message
+        if not isinstance(interaction, discord.Interaction):
+            logger.warning("[Discord] send_ephemeral 需事件来自交互，已忽略。")
+            return None
+
+        try:
+            content, files, view, embeds, _ = await self._parse_to_discord(message)
+        except Exception as e:
+            logger.error(f"[Discord] 解析 ephemeral 消息链失败: {e}", exc_info=True)
+            return None
+
+        kwargs: dict = {"ephemeral": True}
+        if content:
+            kwargs["content"] = content
+        if files:
+            kwargs["files"] = files
+        if view:
+            kwargs["view"] = view
+        if embeds:
+            kwargs["embeds"] = embeds
+        if len(kwargs) == 1:
+            logger.debug("[Discord] 尝试发送空 ephemeral 消息，已忽略。")
+            return None
+
+        sent_message = None
+        ok = False
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message(**kwargs)
+                ok = True
+                try:
+                    sent_message = await interaction.original_response()
+                except Exception:
+                    sent_message = None
+            else:
+                sent_message = await interaction.followup.send(wait=True, **kwargs)
+                ok = True
+        except Exception as e:
+            logger.error(f"[Discord] 发送 ephemeral 消息失败: {e}", exc_info=True)
+
+        if not ok:
+            # 发送失败时不标记已发送，让 pipeline 兜底响应继续接管。
+            return None
+
+        # 后续 send() 继续走私密 followup，避免泄漏到频道。
+        if self.interaction_followup_webhook is None:
+            self.interaction_followup_webhook = interaction.followup
+        self.is_ephemeral = True
+
+        await super().send(message)
+        return str(sent_message.id) if sent_message else None
+
     def prefer_edit_origin(self) -> None:
         """置位后本事件的 send() 改为编辑交互来源消息（按钮所在那条），用于翻页防刷屏。
 
@@ -421,7 +482,11 @@ class DiscordPlatformEvent(AstrMessageEvent):
         custom_id = data.get("custom_id", "") or "?"
         if raw.type == discord.InteractionType.modal_submit:
             values = self.get_modal_values()
-            return f"[表单提交] {custom_id} = {values}" if values else f"[表单提交] {custom_id}"
+            return (
+                f"[表单提交] {custom_id} = {values}"
+                if values
+                else f"[表单提交] {custom_id}"
+            )
         if raw.type == discord.InteractionType.component:
             values = data.get("values") or []
             if values:
