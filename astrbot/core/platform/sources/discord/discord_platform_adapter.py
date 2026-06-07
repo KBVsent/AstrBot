@@ -76,6 +76,8 @@ class DiscordPlatformAdapter(Platform):
         self.activity_name = self.config.get("discord_activity_name", None)
         self.shutdown_event = asyncio.Event()
         self._polling_task = None
+        # slash_name → 底层命令名(cmd_name)，build 时填充；用于把命令 id 同时按这两个规范标识写进 mention 映射
+        self._slash_to_cmd_name: dict[str, str] = {}
 
     @override
     async def send_by_session(
@@ -499,6 +501,8 @@ class DiscordPlatformAdapter(Platform):
             )
             if await self._sync_commands_guarded(commands=[], guild_ids=guild_ids):
                 self._store_synced_fingerprint(None)
+                self._store_command_ids(None)
+                self.client.command_mention_map = {}
                 logger.info("[Discord] Slash commands cleaned up.")
             return
 
@@ -512,6 +516,8 @@ class DiscordPlatformAdapter(Platform):
             mode == "startup_if_changed"
             and fingerprint == self._load_synced_fingerprint()
         ):
+            # 指纹命中 ⇒ 命令集/scope 未变 ⇒ 复用已存 id（别名映射本轮 build 已重建）。
+            self._apply_command_ids(self._load_command_ids())
             logger.info(
                 f"[Discord] Slash commands unchanged since last sync; skipping sync "
                 f"({len(built)} commands remain routable)."
@@ -520,6 +526,9 @@ class DiscordPlatformAdapter(Platform):
 
         if await self._sync_commands_guarded():
             self._store_synced_fingerprint(fingerprint)
+            ids = {c.name: c.id for c in built if c.id}
+            self._store_command_ids(ids)
+            self._apply_command_ids(ids)
             logger.info("[Discord] Command synchronization completed.")
 
     def _build_and_add_commands(self) -> list[discord.SlashCommand] | None:
@@ -542,6 +551,8 @@ class DiscordPlatformAdapter(Platform):
         logger.info("[Discord] Registering slash commands from schema table...")
         built_commands: list[discord.SlashCommand] = []
         used_slash_names: set[str] = set()
+        # 每次 build 重建 slash_name → cmd_name（不持久化，只 id 持久化）。
+        self._slash_to_cmd_name = {}
 
         # 个人安装(User Install)与上下文：仅在全局注册(无调试 guild)时启用。
         # guild_ids 指定的服务器专属指令与 user_install 互斥，且不接受 contexts，故此时跳过。
@@ -617,6 +628,7 @@ class DiscordPlatformAdapter(Platform):
             self.client.add_application_command(command)
             used_slash_names.add(slash_name)
             built_commands.append(command)
+            self._slash_to_cmd_name[slash_name] = cmd_name
 
         if not built_commands:
             logger.info("[Discord] No commands found for registration.")
@@ -723,6 +735,49 @@ class DiscordPlatformAdapter(Platform):
                     f"[Discord] Failed to persist command sync fingerprint: {e}. "
                     "Next restart may re-sync unnecessarily.",
                 )
+
+    def _load_command_ids(self) -> dict[str, int]:
+        """读取已持久化的 slash_name → command id（纯内部状态，WebUI 隐藏）。"""
+        raw = self.config.get("discord_command_ids") or ""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): int(v) for k, v in data.items() if v is not None}
+
+    def _store_command_ids(self, ids: dict[str, int] | None) -> None:
+        """持久化 slash_name → id；None 表示清除（cleanup 后）。"""
+        self.config["discord_command_ids"] = (
+            json.dumps(ids, ensure_ascii=False) if ids else ""
+        )
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Failed to persist command ids: {e}. "
+                    "Command mentions may be unavailable until next sync.",
+                )
+
+    def _apply_command_ids(self, ids: dict[str, int]) -> None:
+        """据 slash_name→id 构建 client.command_mention_map。
+
+        仅按规范标识建键：Discord slash 名 + 底层命令名（cmd_name），均指向其</slash_name:id>
+        """
+        mention_map: dict[str, str] = {}
+        for slash_name, cmd_id in ids.items():
+            mention = f"</{slash_name}:{cmd_id}>"
+            mention_map[slash_name] = mention
+            cmd_name = self._slash_to_cmd_name.get(slash_name)
+            if cmd_name:
+                mention_map.setdefault(cmd_name, mention)
+        self.client.command_mention_map = mention_map
 
     @staticmethod
     def _is_daily_command_quota_error(error: discord.HTTPException) -> bool:

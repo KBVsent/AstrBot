@@ -443,6 +443,14 @@ class DiscordPlatformEvent(AstrMessageEvent):
         except Exception as e:
             logger.error(f"[Discord] 添加反应失败: {e}")
 
+    def get_command_mention_map(self) -> dict[str, str]:
+        """返回「命令名/别名 → Discord 原生 mention（</slash_name:id>）」映射。
+
+        由适配器在指令同步后填充（含中/日文别名）；未同步或拿不到 id 时为空，
+        调用方据此降级为纯文本。供插件把 <cmd> 等命令引用渲染成可点击 mention。
+        """
+        return dict(getattr(self.client, "command_mention_map", {}) or {})
+
     def is_slash_command(self) -> bool:
         """判断是否为斜杠命令"""
         return (

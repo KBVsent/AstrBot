@@ -955,6 +955,12 @@ CONFIG_METADATA_2 = {
                         "type": "string",
                         "invisible": True,
                     },
+                    # 内部状态：已同步指令的 slash_name→id，用于渲染原生命令 mention。
+                    "discord_command_ids": {
+                        "description": "Discord 指令 ID 映射（内部）",
+                        "type": "string",
+                        "invisible": True,
+                    },
                     "discord_guild_id_for_debug": {
                         "description": "指令同步调试服务器 ID",
                         "type": "string",

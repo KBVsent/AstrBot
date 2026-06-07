@@ -45,6 +45,9 @@ class DiscordBotClient(discord.Bot):
         self.on_interaction_received: Callable[[dict], Awaitable[None]] | None = None
         self.on_ready_once_callback: Callable[[], Awaitable[None]] | None = None
         self._ready_once_fired = False
+        # 命令名/别名 → Discord 原生 mention 字符串（</slash_name:id>），当前 scope。
+        # 由适配器在 sync 成功 / 指纹命中加载已存 id 后填充；供事件透出给插件。
+        self.command_mention_map: dict[str, str] = {}
 
     async def on_ready(self) -> None:
         """当机器人成功连接并准备就绪时触发"""
