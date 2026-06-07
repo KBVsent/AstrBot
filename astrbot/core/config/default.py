@@ -460,6 +460,7 @@ CONFIG_METADATA_2 = {
                         "discord_proxy": "",
                         "discord_message_mode": "mention_and_dm",
                         "discord_command_register": True,
+                        "discord_enable_user_install": True,
                         "discord_command_schemas": "",
                         "discord_guild_id_for_debug": "",
                         "discord_activity_name": "",
@@ -927,6 +928,11 @@ CONFIG_METADATA_2 = {
                         "description": "注册 Discord 指令",
                         "hint": "启用后，按下方「指令注册表」将插件指令注册为 Discord 斜杠指令。关闭则不注册任何斜杠指令。",
                         "type": "bool",
+                    },
+                    "discord_enable_user_install": {
+                        "description": "允许个人安装(User Install)",
+                        "type": "bool",
+                        "hint": "允许用户将斜杠指令装到个人账号，在私信等处使用。需在 Developer Portal 勾选 User Install，且仅在调试服务器 ID 留空时生效。",
                     },
                     "discord_command_schemas": {
                         "description": "Discord 指令注册表",

@@ -434,6 +434,10 @@
         "description": "Register Discord slash commands",
         "hint": "When enabled, registers plugin commands as Discord slash commands according to the 'Command Registry' below. When disabled, no slash commands are registered."
       },
+      "discord_enable_user_install": {
+        "description": "Allow User Install",
+        "hint": "Let users install slash commands to their account for use in DMs, etc. Requires enabling User Install in the Developer Portal, and only works when the debug guild ID is empty."
+      },
       "discord_command_schemas": {
         "description": "Discord Command Registry",
         "hint": "Click 'Edit Command Registry' to open the visual editor and manage which plugin commands register as slash commands. Auto-filled with all commands on first startup when empty."
@@ -1229,22 +1233,22 @@
         "hint": "Only effective for qwen3-rerank models. Recommended to write in English."
       },
       "nvidia_rerank_api_base": {
-          "description": "API Base URL"
+        "description": "API Base URL"
       },
       "nvidia_rerank_api_key": {
-          "description": "API Key"
+        "description": "API Key"
       },
       "nvidia_rerank_model": {
-          "description": "Rerank Model Name",
-          "hint": "Please refer to the NVIDIA Docs for the model name."
+        "description": "Rerank Model Name",
+        "hint": "Please refer to the NVIDIA Docs for the model name."
       },
       "nvidia_rerank_model_endpoint": {
-          "description": "Custom Model Endpoint",
-          "hint": "Custom URL suffix endpoint, defaults to /reranking."
+        "description": "Custom Model Endpoint",
+        "hint": "Custom URL suffix endpoint, defaults to /reranking."
       },
       "nvidia_rerank_truncate": {
-          "description": "Text Truncation Strategy",
-          "hint": "Whether to truncate the input to fit the model's maximum context length when the input text is too long."
+        "description": "Text Truncation Strategy",
+        "hint": "Whether to truncate the input to fit the model's maximum context length when the input text is too long."
       },
       "launch_model_if_not_running": {
         "description": "Auto-start model if not running",

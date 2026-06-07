@@ -56,6 +56,9 @@ class DiscordPlatformAdapter(Platform):
         self.registered_handlers = []
         # 指令注册相关
         self.enable_command_register = self.config.get("discord_command_register", True)
+        # 个人安装(User Install)：斜杠指令额外支持装到个人账号，可在私信/群组私聊/任意服务器使用。
+        # 仅全局注册(无调试 guild)时生效；详见 _collect_and_register_commands。
+        self.enable_user_install = self.config.get("discord_enable_user_install", True)
         # 消息模式：mention_and_dm（默认，零特权 intent）/ full_message（旧行为，需特权）。
         # 旧实例存盘里没有该 key，必须写显式 fallback（DEFAULT_CONFIG.platform=[] 不会回填实例字段）。
         self.message_mode = self.config.get("discord_message_mode", "mention_and_dm")
@@ -496,6 +499,29 @@ class DiscordPlatformAdapter(Platform):
         registered_commands: list[str] = []
         used_slash_names: set[str] = set()
 
+        # 个人安装(User Install)与上下文：仅在全局注册(无调试 guild)时启用。
+        # guild_ids 指定的服务器专属指令与 user_install 互斥，且不接受 contexts，故此时跳过。
+        install_kwargs: dict[str, Any] = {}
+        if self.enable_user_install and not self.guild_id:
+            install_kwargs["integration_types"] = {
+                discord.IntegrationType.guild_install,
+                discord.IntegrationType.user_install,
+            }
+            install_kwargs["contexts"] = {
+                discord.InteractionContextType.guild,
+                discord.InteractionContextType.bot_dm,
+                discord.InteractionContextType.private_channel,
+            }
+            logger.info(
+                "[Discord] User install enabled: slash commands support guild + user "
+                "installation, usable in guilds / DMs / private channels."
+            )
+        elif self.enable_user_install and self.guild_id:
+            logger.info(
+                "[Discord] User install requested but a debug guild ID is set; "
+                "registering guild-scoped commands only (user install disabled)."
+            )
+
         for cmd_name, entry in schemas.items():
             if not isinstance(entry, dict):
                 logger.warning(
@@ -535,6 +561,7 @@ class DiscordPlatformAdapter(Platform):
                 "func": callback,
                 "options": options,
                 "guild_ids": [self.guild_id] if self.guild_id else None,
+                **install_kwargs,
             }
             desc_localizations = self._filter_localizations(
                 entry.get("description_localizations")

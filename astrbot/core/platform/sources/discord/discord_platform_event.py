@@ -461,6 +461,22 @@ class DiscordPlatformEvent(AstrMessageEvent):
             == discord.InteractionType.component
         )
 
+    def is_user_install_context(self) -> bool:
+        """判断当前交互是否为「个人安装(User Install)」上下文。
+
+        为 True 时，Bot 并非该频道/服务器的成员，组件交互(按钮/下拉)与频道发送会失败
+
+        判定依据：交互被用户授权(user install)但未被服务器授权(guild install)。
+        非交互事件（普通消息）恒为 False。
+        """
+        raw = self.message_obj.raw_message
+        if not isinstance(raw, discord.Interaction):
+            return False
+        try:
+            return raw.is_user_authorized() and not raw.is_guild_authorized()
+        except Exception:
+            return False
+
     def get_interaction_custom_id(self) -> str:
         """获取交互组件的custom_id"""
         if self.is_button_interaction():
