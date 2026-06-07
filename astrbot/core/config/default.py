@@ -459,7 +459,7 @@ CONFIG_METADATA_2 = {
                         "discord_token": "",
                         "discord_proxy": "",
                         "discord_message_mode": "mention_and_dm",
-                        "discord_command_register": True,
+                        "discord_command_register": "startup_if_changed",
                         "discord_enable_user_install": True,
                         "discord_command_schemas": "",
                         "discord_guild_id_for_debug": "",
@@ -925,9 +925,17 @@ CONFIG_METADATA_2 = {
                         "MESSAGE CONTENT 与 SERVER MEMBERS 特权 intent。斜杠指令(slash command)两种模式下均可用。",
                     },
                     "discord_command_register": {
-                        "description": "注册 Discord 指令",
-                        "hint": "启用后，按下方「指令注册表」将插件指令注册为 Discord 斜杠指令。关闭则不注册任何斜杠指令。",
-                        "type": "bool",
+                        "description": "Discord 指令同步策略",
+                        "type": "string",
+                        "options": [
+                            "off",
+                            "startup_if_changed",
+                            "force_startup",
+                            "cleanup",
+                        ],
+                        "default": "startup_if_changed",
+                        "hint": "斜杠指令同步时机。off：不注册；startup_if_changed：仅指令变更时同步（生产推荐）；"
+                        "force_startup：每次启动都同步（开发/强制重同步）；cleanup：清空已注册指令。",
                     },
                     "discord_enable_user_install": {
                         "description": "允许个人安装(User Install)",
@@ -939,6 +947,13 @@ CONFIG_METADATA_2 = {
                         "type": "string",
                         "_special": "discord_command_registry",
                         "hint": "点「编辑指令表」打开可视化编辑器，管理哪些插件指令注册为斜杠指令。留空时启动自动填入全部指令。",
+                    },
+                    # 内部状态：上次成功同步的指令指纹，用于 startup_if_changed 的变更检测。
+                    # invisible 使其在 WebUI 隐藏（仅持久化，不供用户编辑）。
+                    "discord_command_synced_fingerprint": {
+                        "description": "Discord 指令同步指纹（内部）",
+                        "type": "string",
+                        "invisible": True,
                     },
                     "discord_guild_id_for_debug": {
                         "description": "指令同步调试服务器 ID",

@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import inspect
 import json
 import re
@@ -55,9 +56,15 @@ class DiscordPlatformAdapter(Platform):
         self.bot_self_id: str | None = None
         self.registered_handlers = []
         # 指令注册相关
-        self.enable_command_register = self.config.get("discord_command_register", True)
+        # 同步策略枚举（off / startup_if_changed / force_startup / cleanup），存于 discord_command_register。
+        # 该键由旧布尔开关复用而来：旧实例存盘里是 bool（True/False），不在枚举集合内 → 回退默认，
+        # WebUI 下拉对旧 bool 值显示空白，促使用户在更新后重新选择一次。
+        mode = self.config.get("discord_command_register")
+        if mode not in ("off", "startup_if_changed", "force_startup", "cleanup"):
+            mode = "startup_if_changed"
+        self.command_register_mode = mode
         # 个人安装(User Install)：斜杠指令额外支持装到个人账号，可在私信/群组私聊/任意服务器使用。
-        # 仅全局注册(无调试 guild)时生效；详见 _collect_and_register_commands。
+        # 仅全局注册(无调试 guild)时生效；详见 _build_and_add_commands。
         self.enable_user_install = self.config.get("discord_enable_user_install", True)
         # 消息模式：mention_and_dm（默认，零特权 intent）/ full_message（旧行为，需特权）。
         # 旧实例存盘里没有该 key，必须写显式 fallback（DEFAULT_CONFIG.platform=[] 不会回填实例字段）。
@@ -174,8 +181,7 @@ class DiscordPlatformAdapter(Platform):
 
         async def callback() -> None:
             try:
-                if self.enable_command_register:
-                    await self._collect_and_register_commands()
+                await self._sync_commands_by_mode()
                 if self.activity_name:
                     await self.client.change_presence(
                         status=discord.Status.online,
@@ -442,21 +448,8 @@ class DiscordPlatformAdapter(Platform):
     async def terminate(self) -> None:
         logger.info("[Discord] Shutting down adapter...")
         self.shutdown_event.set()
-        logger.info("[Discord] Cleaning up commands...")
-        if self.enable_command_register and self.client:
-            try:
-                await asyncio.wait_for(
-                    self.client.sync_commands(
-                        commands=[],
-                        guild_ids=[self.guild_id] if self.guild_id else None,
-                    ),
-                    timeout=10,
-                )
-                logger.info("[Discord] Commands cleaned up successfully.")
-            except Exception as e:
-                logger.warning(
-                    f"[Discord] Error occurred while cleaning up commands: {e}"
-                )
+        # 关闭时不再清理已注册指令：清理改由 discord_command_register='cleanup' 显式触发，
+        # 避免每次重启/重载都对 Discord 发清空请求（全局清空易撞限速 stall 并超时）。
 
         if self._polling_task:
             self._polling_task.cancel()
@@ -480,23 +473,74 @@ class DiscordPlatformAdapter(Platform):
         """注册处理器信息"""
         self.registered_handlers.append(handler_info)
 
-    async def _collect_and_register_commands(self) -> None:
-        """按指令注册表（discord_command_schemas）注册斜杠指令。
+    # 全局指令同步超时（秒）。全局注册可能撞 Discord 限速 stall，超时兜底避免无声永久挂起。
+    _SYNC_TIMEOUT = 60
 
+    async def _sync_commands_by_mode(self) -> None:
+        """按 discord_command_register 决定是否/如何把斜杠指令同步到 Discord。
+
+        作用域由 discord_guild_id_for_debug 决定（设了→guild 即时；留空→全局 + user install）。
+        无论是否真正 sync，都先 build + add_application_command：Pycord 路由进来的交互按
+        id 查不到会回退按指令名匹配 pending 指令，故"build 但跳过 sync"时交互仍可响应。
+        """
+        mode = self.command_register_mode
+        guild_ids = [self.guild_id] if self.guild_id else None
+
+        if mode == "off":
+            logger.info(
+                "[Discord] Command register mode is 'off'; no slash commands registered."
+            )
+            return
+
+        if mode == "cleanup":
+            logger.info(
+                "[Discord] Command register mode is 'cleanup'; clearing all registered "
+                "slash commands..."
+            )
+            if await self._sync_commands_guarded(commands=[], guild_ids=guild_ids):
+                self._store_synced_fingerprint(None)
+                logger.info("[Discord] Slash commands cleaned up.")
+            return
+
+        # startup_if_changed / force_startup
+        built = self._build_and_add_commands()
+        if not built:
+            return
+
+        fingerprint = self._compute_command_fingerprint(built)
+        if (
+            mode == "startup_if_changed"
+            and fingerprint == self._load_synced_fingerprint()
+        ):
+            logger.info(
+                f"[Discord] Slash commands unchanged since last sync; skipping sync "
+                f"({len(built)} commands remain routable)."
+            )
+            return
+
+        if await self._sync_commands_guarded():
+            self._store_synced_fingerprint(fingerprint)
+            logger.info("[Discord] Command synchronization completed.")
+
+    def _build_and_add_commands(self) -> list[discord.SlashCommand] | None:
+        """按指令注册表（discord_command_schemas）构建并 add_application_command。
+
+        不触发同步，仅把指令登记到 client.pending（用于路由）。返回构建出的指令列表；
+        注册表 JSON 非法或为空时返回 None（已记录日志）。
         注册表为空时自动发现全部已激活指令并持久化（仅一次），之后保留用户编辑。
         """
         schemas = self._load_or_seed_command_schemas()
         if schemas is None:
             # JSON 解析失败，已记录日志；中止注册，避免破坏用户数据。
-            return
+            return None
         if not schemas:
             logger.info(
                 "[Discord] Command schema table is empty; no slash commands registered."
             )
-            return
+            return None
 
         logger.info("[Discord] Registering slash commands from schema table...")
-        registered_commands: list[str] = []
+        built_commands: list[discord.SlashCommand] = []
         used_slash_names: set[str] = set()
 
         # 个人安装(User Install)与上下文：仅在全局注册(无调试 guild)时启用。
@@ -569,29 +613,64 @@ class DiscordPlatformAdapter(Platform):
             if desc_localizations:
                 slash_kwargs["description_localizations"] = desc_localizations
 
-            self.client.add_application_command(discord.SlashCommand(**slash_kwargs))
+            command = discord.SlashCommand(**slash_kwargs)
+            self.client.add_application_command(command)
             used_slash_names.add(slash_name)
-            registered_commands.append(slash_name)
+            built_commands.append(command)
 
-        if registered_commands:
-            logger.info(
-                f"[Discord] Ready to sync {len(registered_commands)} commands: "
-                f"{', '.join(registered_commands)}",
-            )
-            if len(registered_commands) > 100 and not self.guild_id:
-                logger.warning(
-                    "[Discord] More than 100 global slash commands configured; Discord "
-                    "caps global commands at 100. Disable unneeded ones via "
-                    "'enabled': false in discord_command_schemas, or set a debug guild ID.",
-                )
-        else:
+        if not built_commands:
             logger.info("[Discord] No commands found for registration.")
+            return None
 
-        # 使用 Pycord 的方法同步指令
-        # 注意：这可能需要一些时间，并且有频率限制
+        logger.info(
+            f"[Discord] Built {len(built_commands)} commands: "
+            f"{', '.join(c.name for c in built_commands)}",
+        )
+        if len(built_commands) > 100 and not self.guild_id:
+            logger.warning(
+                "[Discord] More than 100 global slash commands configured; Discord "
+                "caps global commands at 100. Disable unneeded ones via "
+                "'enabled': false in discord_command_schemas, or set a debug guild ID.",
+            )
+        return built_commands
+
+    async def _sync_commands_guarded(
+        self,
+        *,
+        commands: list[discord.SlashCommand] | None = None,
+        guild_ids: list[int] | None = None,
+    ) -> bool:
+        """带超时与错误兜底地调用 Pycord sync_commands；永不外抛，返回是否成功。
+
+        commands=[] 用于清空；commands=None 走 client.pending（各指令自带 guild_ids）。
+        """
+        kwargs: dict[str, Any] = {}
+        if commands is not None:
+            kwargs["commands"] = commands
+            if guild_ids is not None:
+                kwargs["guild_ids"] = guild_ids
         try:
-            await self.client.sync_commands()
-            logger.info("[Discord] Command synchronization completed.")
+            await asyncio.wait_for(
+                self.client.sync_commands(**kwargs), timeout=self._SYNC_TIMEOUT
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Discord] Command sync timed out after {self._SYNC_TIMEOUT}s "
+                "(likely a Discord global rate-limit stall on command registration). "
+                "Commands were not synced this round; set a debug guild ID for instant, "
+                "separately-rate-limited guild registration.",
+            )
+            return False
+        except RuntimeError as e:
+            # reload 后旧 client 的 on_ready task 醒来时 session 已关，会抛 "Session is closed"。
+            if "Session is closed" in str(e):
+                logger.warning(
+                    "[Discord] Command sync aborted: HTTP session already closed "
+                    "(stale on_ready task after adapter reload).",
+                )
+                return False
+            raise
         except discord.HTTPException as e:
             if self._is_daily_command_quota_error(e):
                 logger.warning(
@@ -599,8 +678,51 @@ class DiscordPlatformAdapter(Platform):
                     "(30034); command sync skipped. Existing commands should "
                     "continue to work until the quota resets.",
                 )
-                return
+                return False
             logger.warning(f"[Discord] Sync commands failed: {e}")
+            return False
+
+    def _compute_command_fingerprint(self, commands: list[discord.SlashCommand]) -> str:
+        """对指令定义 + 作用域 + bot 身份算 sha256 指纹，用于变更检测。
+
+        含作用域与 bot id → 切换 guild↔global 或更换 bot 时自动失效重同步。
+        integration_types/contexts 由 set 推导成 list（顺序不稳定），先排序归一化。
+        """
+        bot_user_id = self.client.user.id if self.client and self.client.user else None
+        payloads: list[dict] = []
+        for command in commands:
+            payload = command.to_dict()
+            for key in ("integration_types", "contexts"):
+                if isinstance(payload.get(key), list):
+                    payload[key] = sorted(payload[key])
+            payloads.append(payload)
+        material = {
+            "scope": "guild" if self.guild_id else "global",
+            "guild_id": self.guild_id,
+            "user_install": bool(self.enable_user_install and not self.guild_id),
+            "bot_user_id": str(bot_user_id) if bot_user_id else None,
+            "commands": payloads,
+        }
+        blob = json.dumps(material, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _load_synced_fingerprint(self) -> str | None:
+        """读取上次成功同步的指令指纹（纯内部状态，不在 schema/WebUI 显示）。"""
+        return self.config.get("discord_command_synced_fingerprint") or None
+
+    def _store_synced_fingerprint(self, fingerprint: str | None) -> None:
+        """写入并持久化已同步指纹；None 表示清除（cleanup 后）。"""
+        self.config["discord_command_synced_fingerprint"] = fingerprint or ""
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Failed to persist command sync fingerprint: {e}. "
+                    "Next restart may re-sync unnecessarily.",
+                )
 
     @staticmethod
     def _is_daily_command_quota_error(error: discord.HTTPException) -> bool:

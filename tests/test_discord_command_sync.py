@@ -32,7 +32,7 @@ def _build_adapter(monkeypatch: pytest.MonkeyPatch):
     )
 
     adapter = DiscordPlatformAdapter(
-        {"discord_command_register": True},
+        {"discord_command_register": "force_startup"},
         {},
         asyncio.Queue(),
     )
@@ -46,16 +46,27 @@ def _build_adapter(monkeypatch: pytest.MonkeyPatch):
 async def test_discord_command_sync_ignores_daily_quota(monkeypatch):
     adapter, mod = _build_adapter(monkeypatch)
 
-    # 注册表非空才会走到 sync_commands()：空 schema 会在 _collect_and_register_commands
-    # 早退（"schema table is empty"），永远触达不到这里要测的配额错误分支。SlashCommand 构造
-    # 被替身（本测聚焦同步/配额处理，不验证 Pycord 指令对象内部）。
+    # 注册表非空才会走到 sync_commands()：空 schema 会在 _build_and_add_commands
+    # 早退（"schema table is empty"），永远触达不到这里要测的配额错误分支。force_startup 模式
+    # 跳过指纹短路（startup_if_changed 才比对指纹），直达 _sync_commands_guarded 的 sync。
+    # SlashCommand 构造被替身（本测聚焦同步/配额处理，不验证 Pycord 指令对象内部）。
     monkeypatch.setattr(
         adapter,
         "_load_or_seed_command_schemas",
         lambda: {"ping": {"enabled": True, "slash_name": "ping", "description": "ping"}},
     )
     monkeypatch.setattr(adapter, "_build_options", lambda _raw: [])
-    monkeypatch.setattr(mod.discord, "SlashCommand", MagicMock(), raising=False)
+
+    # SlashCommand 替身需带真实 str name：_build_and_add_commands 会 ', '.join(c.name)。
+    def _fake_slash_command(**kwargs):
+        cmd = MagicMock()
+        cmd.name = kwargs.get("name")
+        cmd.id = None
+        return cmd
+
+    monkeypatch.setattr(
+        mod.discord, "SlashCommand", _fake_slash_command, raising=False
+    )
 
     warning = Mock()
     monkeypatch.setattr(mod.logger, "warning", warning)
@@ -64,7 +75,7 @@ async def test_discord_command_sync_ignores_daily_quota(monkeypatch):
         code=30034,
     )
 
-    await adapter._collect_and_register_commands()
+    await adapter._sync_commands_by_mode()
 
     adapter.client.sync_commands.assert_awaited_once()
     warning.assert_called_once()

@@ -433,8 +433,14 @@
         "hint": "启用后，AstrBot 将接收来自其他 Discord 机器人的消息。适用于机器人间通信场景（如消息转发）。默认关闭。"
       },
       "discord_command_register": {
-        "description": "注册 Discord 指令",
-        "hint": "启用后，按下方「指令注册表」将插件指令注册为 Discord 斜杠指令。关闭则不注册任何斜杠指令。"
+        "description": "Discord 指令同步策略",
+        "hint": "斜杠指令同步时机。off：不注册；startup_if_changed：仅指令变更时同步（生产推荐）；force_startup：每次启动都同步（开发/强制重同步）；cleanup：清空已注册指令。",
+        "labels": [
+          "关闭",
+          "仅变更时同步",
+          "每次启动强制同步",
+          "清空指令"
+        ]
       },
       "discord_enable_user_install": {
         "description": "允许个人安装(User Install)",

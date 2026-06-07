@@ -431,8 +431,14 @@
         "hint": "When enabled, AstrBot will receive messages from other Discord bots. Useful for bot-to-bot communication scenarios (e.g., message forwarding). Disabled by default."
       },
       "discord_command_register": {
-        "description": "Register Discord slash commands",
-        "hint": "When enabled, registers plugin commands as Discord slash commands according to the 'Command Registry' below. When disabled, no slash commands are registered."
+        "description": "Discord command sync strategy",
+        "hint": "When slash commands sync. off: register nothing; startup_if_changed: sync only when commands change (recommended); force_startup: sync on every startup (dev / force re-sync); cleanup: clear registered commands.",
+        "labels": [
+          "Off",
+          "Sync if changed",
+          "Force sync on startup",
+          "Clean up"
+        ]
       },
       "discord_enable_user_install": {
         "description": "Allow User Install",

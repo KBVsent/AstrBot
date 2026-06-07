@@ -36,7 +36,8 @@ class DiscordBotClient(discord.Bot):
             intents.members = True  # 订阅成员事件 (Privileged)
 
         # 初始化Bot
-        super().__init__(intents=intents, proxy=proxy)
+        # 指令同步完全由适配器的 _sync_commands_by_mode 接管，故必须关掉这个自动同步。
+        super().__init__(intents=intents, proxy=proxy, auto_sync_commands=False)
 
         # 回调函数
         self.on_message_received: Callable[[dict], Awaitable[None]] | None = None
