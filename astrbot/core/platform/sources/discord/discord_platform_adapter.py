@@ -488,7 +488,9 @@ class DiscordPlatformAdapter(Platform):
         client = self.client
         app_id = client.application_id or (client.user.id if client.user else None)
         if not app_id:
-            logger.warning("[Discord] Cannot clear commands: application id unavailable.")
+            logger.warning(
+                "[Discord] Cannot clear commands: application id unavailable."
+            )
             return False
         label = self._scope_label(guild_id)
         try:
@@ -910,7 +912,7 @@ class DiscordPlatformAdapter(Platform):
             )
 
     def _build_options(self, raw_options: Any) -> list[discord.Option]:
-        """从注册表条目的 options 构造 Discord 选项；缺省时给单个通用 params 选项。
+        """从注册表条目的 options 构造 Discord 选项；未指定时给单个通用 params 选项。
 
         作为框架能力，支持 Discord 全部参数类型（见 ``type_map``）。触发时回调按值的实际类型
         通用地映射进 AstrBot 消息模型（见 ``_create_dynamic_callback``）：标量入 message_str
@@ -931,7 +933,7 @@ class DiscordPlatformAdapter(Platform):
         }
         specs = (
             raw_options
-            if isinstance(raw_options, list) and raw_options
+            if isinstance(raw_options, list)
             else [
                 {"name": "params", "description": "指令的所有参数", "required": False}
             ]
@@ -964,11 +966,84 @@ class DiscordPlatformAdapter(Platform):
             loc = self._filter_localizations(spec.get("description_localizations"))
             if loc:
                 opt_kwargs["description_localizations"] = loc
+            choices = self._build_choices(name, opt_type, spec.get("choices"))
+            if choices:
+                opt_kwargs["choices"] = choices
             # input_type 是 discord.Option 的仅位置参数（签名 `/` 之前），必须位置传入；
             # 用 type=/input_type= 关键字会被丢进 **kwargs 忽略、退回默认 string。
             options.append(discord.Option(type_map[opt_type], **opt_kwargs))
             names.add(name)
         return options
+
+    def _build_choices(
+        self, opt_name: str, opt_type: str, raw_choices: Any
+    ) -> list[discord.OptionChoice]:
+        """从 option spec 的 choices 构造 Discord 原生下拉项；非 list/空时返回 []。
+
+        choice 的value 按 option 的 type 转型（string→str / integer→int / number→float），转型失败、
+        缺 name/value 或 string value 超 100 字符的项告警跳过。Discord 上限 25 项/选项，
+        超出截断并告警；choices 仅 string/integer/number 类型合法，其余类型带 choices 时整体忽略
+        """
+        if not isinstance(raw_choices, list) or not raw_choices:
+            return []
+        # Discord 仅 STRING/INTEGER/NUMBER 选项可带 choices；其余类型带 choices 会让
+        # sync_commands 因非法 payload 失败，故整体忽略并告警。
+        if opt_type not in ("string", "integer", "number"):
+            logger.warning(
+                f"[Discord] Option '{opt_name}': choices are only valid for "
+                f"string/integer/number options, not '{opt_type}'; ignoring choices."
+            )
+            return []
+        # value 转型函数：按 option 类型对齐，非数值类型一律 str。
+        casters = {"integer": int, "number": float}
+        cast = casters.get(opt_type, str)
+        out: list[discord.OptionChoice] = []
+        for item in raw_choices:
+            if not isinstance(item, dict):
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': skipping non-object choice {item!r}."
+                )
+                continue
+            cname = str(item.get("name") or "").strip()
+            if not cname:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': skipping choice without a name."
+                )
+                continue
+            raw_value = item.get("value")
+            # value 是路由 token，缺失时无法转型/路由（避免 str(None)→"None"），直接跳过。
+            if raw_value is None:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' has no value; skipping."
+                )
+                continue
+            try:
+                cvalue = cast(raw_value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' value "
+                    f"{raw_value!r} not coercible to {opt_type}; skipping."
+                )
+                continue
+            # Discord 限制 string choice value ≤ 100 字符；截断会改变路由 token，故跳过。
+            if isinstance(cvalue, str) and len(cvalue) > 100:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' value exceeds "
+                    "100 chars (Discord limit); skipping."
+                )
+                continue
+            choice_kwargs: dict[str, Any] = {"name": cname[:100], "value": cvalue}
+            cloc = self._filter_localizations(item.get("name_localizations"))
+            if cloc:
+                choice_kwargs["name_localizations"] = cloc
+            out.append(discord.OptionChoice(**choice_kwargs))
+        if len(out) > 25:
+            logger.warning(
+                f"[Discord] Option '{opt_name}': {len(out)} choices exceed Discord's "
+                "limit of 25; truncating to the first 25."
+            )
+            out = out[:25]
+        return out
 
     @staticmethod
     def _filter_localizations(raw: Any) -> dict[str, str]:

@@ -175,6 +175,64 @@
                       hide-details maxlength="100"></v-text-field>
                     <v-btn icon="mdi-close" size="x-small" variant="text" @click="opt.locs.splice(li, 1)"></v-btn>
                   </div>
+
+                  <!-- 下拉选项（choices，仅 string/integer/number 可用） -->
+                  <template v-if="isChoiceable(opt.type)">
+                    <v-divider class="my-2"></v-divider>
+                    <div class="d-flex align-center mb-1">
+                      <span class="text-caption font-weight-medium">{{ tm('choices') }}</span>
+                      <v-chip v-if="opt.choices.length" size="x-small" label class="ml-2"
+                        :color="opt.choices.length > 25 ? 'error' : undefined">{{ opt.choices.length }}/25</v-chip>
+                      <span class="text-caption text-disabled ml-2">{{ tm('choicesHint') }}</span>
+                      <v-spacer></v-spacer>
+                      <v-btn size="x-small" variant="text" color="primary" @click="addChoice(opt)">
+                        <v-icon start size="x-small">mdi-plus</v-icon>{{ tm('addChoice') }}
+                      </v-btn>
+                    </div>
+                    <div v-if="!opt.choices.length" class="text-caption text-disabled mb-1">{{ tm('noChoices') }}</div>
+                    <v-card v-for="(ch, ci) in opt.choices" :key="ci" variant="tonal" class="pa-2 mb-1" rounded="lg">
+                      <div class="d-flex ga-2 align-center">
+                        <v-chip size="x-small" label variant="outlined">{{ ci + 1 }}</v-chip>
+                        <v-text-field v-model="ch.name" :label="tm('choiceName')" density="compact" variant="outlined"
+                          hide-details="auto" maxlength="100" style="max-width: 200px"
+                          :error-messages="choiceNameErrors(opt, ci)"></v-text-field>
+                        <v-text-field v-model="ch.value" :label="tm('choiceValue')" density="compact" variant="outlined"
+                          hide-details="auto" :type="opt.type === 'string' ? 'text' : 'number'"
+                          :error-messages="choiceValueErrors(opt, ci)"></v-text-field>
+                        <v-tooltip :text="tm('choiceLocalizations')" location="top">
+                          <template v-slot:activator="{ props: tip }">
+                            <v-btn v-bind="tip" icon size="x-small" variant="text"
+                              :color="ch._open ? 'primary' : undefined" @click="ch._open = !ch._open">
+                              <v-icon size="small">mdi-translate</v-icon>
+                            </v-btn>
+                          </template>
+                        </v-tooltip>
+                        <v-btn icon="mdi-arrow-up" size="x-small" variant="text" :disabled="ci === 0"
+                          @click="moveChoice(opt, ci, -1)"></v-btn>
+                        <v-btn icon="mdi-arrow-down" size="x-small" variant="text"
+                          :disabled="ci === opt.choices.length - 1" @click="moveChoice(opt, ci, 1)"></v-btn>
+                        <v-btn icon="mdi-delete-outline" size="x-small" variant="text" color="error"
+                          @click="opt.choices.splice(ci, 1)"></v-btn>
+                      </div>
+                      <div v-if="ch._open" class="mt-2 pl-2">
+                        <div class="d-flex align-center mb-1">
+                          <span class="text-caption text-disabled">{{ tm('choiceLocalizations') }}</span>
+                          <v-btn size="x-small" variant="text" color="primary" @click="addLoc(ch.locs)">
+                            <v-icon start size="x-small">mdi-plus</v-icon>{{ tm('addLocalization') }}
+                          </v-btn>
+                        </div>
+                        <div v-for="(loc, li) in ch.locs" :key="li" class="d-flex ga-2 mb-1 align-center">
+                          <v-select v-model="loc.locale" :items="VALID_LOCALES" :label="tm('locale')" density="compact"
+                            variant="outlined" hide-details style="max-width: 140px"></v-select>
+                          <v-text-field v-model="loc.text" :label="tm('text')" density="compact" variant="outlined"
+                            hide-details maxlength="100"></v-text-field>
+                          <v-btn icon="mdi-close" size="x-small" variant="text" @click="ch.locs.splice(li, 1)"></v-btn>
+                        </div>
+                      </div>
+                    </v-card>
+                  </template>
+                  <v-alert v-else-if="opt.choices.length" type="info" variant="tonal" density="compact"
+                    class="mt-2 py-1 text-caption">{{ tm('choicesIgnored') }}</v-alert>
                 </v-card>
               </div>
             </v-card>
@@ -281,6 +339,28 @@ function locsArrToObj(arr) {
   return o
 }
 
+// choices 仅对 string/integer/number 类型合法（与适配器 _build_choices 守卫一致）。
+function isChoiceable(type) {
+  return type === 'string' || type === 'integer' || type === 'number'
+}
+// schema choice -> 可编辑模型：value 一律以字符串持有便于输入，输出时按类型转回。
+function choiceToModel(ch) {
+  ch = ch && typeof ch === 'object' ? ch : {}
+  return {
+    name: ch.name || '',
+    value: ch.value === undefined || ch.value === null ? '' : String(ch.value),
+    locs: locsObjToArr(ch.name_localizations),
+    _open: false,
+  }
+}
+// 按 option 类型把 choice value 字符串转回标量（apply 前已被 errors 校验保证合法）。
+function castChoiceValue(type, v) {
+  const s = String(v ?? '').trim()
+  if (type === 'integer') return Number.parseInt(s, 10)
+  if (type === 'number') return Number.parseFloat(s)
+  return s
+}
+
 function entryToModel(key, e) {
   e = e && typeof e === 'object' ? e : {}
   return {
@@ -298,6 +378,7 @@ function entryToModel(key, e) {
           type: OPTION_TYPES.includes(o.type) ? o.type : 'string',
           required: !!o.required,
           locs: locsObjToArr(o.description_localizations),
+          choices: Array.isArray(o.choices) ? o.choices.map(choiceToModel) : [],
         }))
       : [],
   }
@@ -314,13 +395,27 @@ function modelToSchema() {
       slash_name: String(c.slash_name || key).trim(),
       description: c.description || '',
       description_localizations: locsArrToObj(c.locs),
-      options: c.options.map((o) => ({
-        name: String(o.name || '').trim(),
-        description: o.description || '',
-        type: OPTION_TYPES.includes(o.type) ? o.type : 'string',
-        description_localizations: locsArrToObj(o.locs),
-        required: !!o.required,
-      })),
+      options: c.options.map((o) => {
+        const type = OPTION_TYPES.includes(o.type) ? o.type : 'string'
+        const out = {
+          name: String(o.name || '').trim(),
+          description: o.description || '',
+          type,
+          description_localizations: locsArrToObj(o.locs),
+          required: !!o.required,
+        }
+        // 仅 string/integer/number 输出 choices；类型不符时丢弃（避免非法 payload）。
+        const chs = (o.choices || []).filter((ch) => String(ch.name || '').trim() !== '')
+        if (isChoiceable(type) && chs.length) {
+          out.choices = chs.map((ch) => {
+            const c = { name: String(ch.name).trim(), value: castChoiceValue(type, ch.value) }
+            const nl = locsArrToObj(ch.locs)
+            if (Object.keys(nl).length) c.name_localizations = nl
+            return c
+          })
+        }
+        return out
+      }),
     }
   }
   return out
@@ -424,6 +519,31 @@ const errors = computed(() => {
       onames.add(on)
       if (o.required && sawOptional) errs.push(tm('cmdRequiredAfterOptional', { cmd: key, opt: on }))
       if (!o.required) sawOptional = true
+      // choices 校验（仅 choiceable 类型；非法类型的 choices 会在输出时丢弃，不报错）
+      if (isChoiceable(o.type) && Array.isArray(o.choices) && o.choices.length) {
+        if (o.choices.length > 25) errs.push(tm('cmdTooManyChoices', { cmd: key, opt: on }))
+        const cvals = new Set()
+        for (const ch of o.choices) {
+          const cn = String(ch.name || '').trim()
+          if (!cn) {
+            errs.push(tm('cmdChoiceNameRequired', { cmd: key, opt: on }))
+            continue
+          }
+          const v = String(ch.value ?? '').trim()
+          if (v === '') {
+            errs.push(tm('cmdChoiceValueRequired', { cmd: key, opt: on, choice: cn }))
+            continue
+          }
+          if (o.type === 'integer' && !Number.isInteger(Number(v)))
+            errs.push(tm('cmdChoiceValueBad', { cmd: key, opt: on, choice: cn }))
+          else if (o.type === 'number' && !Number.isFinite(Number(v)))
+            errs.push(tm('cmdChoiceValueBad', { cmd: key, opt: on, choice: cn }))
+          else if (o.type === 'string' && v.length > 100)
+            errs.push(tm('cmdChoiceValueBad', { cmd: key, opt: on, choice: cn }))
+          if (cvals.has(v)) errs.push(tm('cmdChoiceDupValue', { cmd: key, opt: on }))
+          cvals.add(v)
+        }
+      }
     }
   }
   return [...new Set(errs)]
@@ -457,6 +577,7 @@ function addOption(c) {
     type: 'string',
     required: false,
     locs: [],
+    choices: [],
   })
 }
 function moveOption(c, idx, dir) {
@@ -464,6 +585,30 @@ function moveOption(c, idx, dir) {
   if (j < 0 || j >= c.options.length) return
   const [it] = c.options.splice(idx, 1)
   c.options.splice(j, 0, it)
+}
+function addChoice(opt) {
+  if (!Array.isArray(opt.choices)) opt.choices = []
+  opt.choices.push({ name: '', value: '', locs: [], _open: false })
+}
+function moveChoice(opt, idx, dir) {
+  const j = idx + dir
+  if (j < 0 || j >= opt.choices.length) return
+  const [it] = opt.choices.splice(idx, 1)
+  opt.choices.splice(j, 0, it)
+}
+function choiceNameErrors(opt, ci) {
+  const cn = String(opt.choices[ci].name || '').trim()
+  if (!cn) return [tm('choiceNameRequired')]
+  if (cn.length > 100) return [tm('choiceNameLong')]
+  return []
+}
+function choiceValueErrors(opt, ci) {
+  const v = String(opt.choices[ci].value ?? '').trim()
+  if (v === '') return [tm('choiceValueRequired')]
+  if (opt.type === 'integer' && !Number.isInteger(Number(v))) return [tm('choiceValueInt')]
+  if (opt.type === 'number' && !Number.isFinite(Number(v))) return [tm('choiceValueNum')]
+  if (opt.type === 'string' && v.length > 100) return [tm('choiceValueLong')]
+  return []
 }
 
 // discover / available
