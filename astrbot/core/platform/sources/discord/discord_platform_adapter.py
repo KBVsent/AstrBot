@@ -478,6 +478,35 @@ class DiscordPlatformAdapter(Platform):
     # 全局指令同步超时（秒）。全局注册可能撞 Discord 限速 stall，超时兜底避免无声永久挂起。
     _SYNC_TIMEOUT = 60
 
+    @staticmethod
+    def _scope_label(scope: str | None) -> str:
+        """作用域日志标签：None→'global'；guild id→'guild <id>'。"""
+        return f"guild {scope}" if scope else "global"
+
+    async def _clear_scope_commands(self, guild_id: str | None) -> bool:
+        """精确清空某作用域的全部斜杠指令：guild_id 给定→只清该 guild；None→清全局"""
+        client = self.client
+        app_id = client.application_id or (client.user.id if client.user else None)
+        if not app_id:
+            logger.warning("[Discord] Cannot clear commands: application id unavailable.")
+            return False
+        label = self._scope_label(guild_id)
+        try:
+            if guild_id:
+                coro = client.http.bulk_upsert_guild_commands(app_id, int(guild_id), [])
+            else:
+                coro = client.http.bulk_upsert_global_commands(app_id, [])
+            await asyncio.wait_for(coro, timeout=self._SYNC_TIMEOUT)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Discord] Clearing {label} commands timed out after {self._SYNC_TIMEOUT}s."
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"[Discord] Failed to clear {label} commands: {e}")
+            return False
+
     async def _sync_commands_by_mode(self) -> None:
         """按 discord_command_register 决定是否/如何把斜杠指令同步到 Discord。
 
@@ -486,7 +515,6 @@ class DiscordPlatformAdapter(Platform):
         id 查不到会回退按指令名匹配 pending 指令，故"build 但跳过 sync"时交互仍可响应。
         """
         mode = self.command_register_mode
-        guild_ids = [self.guild_id] if self.guild_id else None
 
         if mode == "off":
             logger.info(
@@ -495,15 +523,20 @@ class DiscordPlatformAdapter(Platform):
             return
 
         if mode == "cleanup":
+            # 只清当前配置的作用域（guild→只清该 guild；global→清全局）。
             logger.info(
-                "[Discord] Command register mode is 'cleanup'; clearing all registered "
-                "slash commands..."
+                "[Discord] Command register mode is 'cleanup'; clearing slash commands on "
+                f"{self._scope_label(self.guild_id)}..."
             )
-            if await self._sync_commands_guarded(commands=[], guild_ids=guild_ids):
+            if await self._clear_scope_commands(self.guild_id):
                 self._store_synced_fingerprint(None)
                 self._store_command_ids(None)
                 self.client.command_mention_map = {}
-                logger.info("[Discord] Slash commands cleaned up.")
+                logger.info(
+                    "[Discord] Slash commands cleaned up. If commands were previously "
+                    "registered to a different scope (e.g. a debug guild), set that guild "
+                    "id in discord_guild_id_for_debug and run cleanup again to remove them."
+                )
             return
 
         # startup_if_changed / force_startup
