@@ -441,8 +441,30 @@
         "hint": "启用后，AstrBot 将接收来自其他 Discord 机器人的消息。适用于机器人间通信场景（如消息转发）。默认关闭。"
       },
       "discord_command_register": {
-        "description": "注册 Discord 指令",
-        "hint": "启用后，自动将插件指令注册为 Discord 斜杠指令"
+        "description": "Discord 指令同步策略",
+        "hint": "斜杠指令同步时机。off：不注册；startup_if_changed：仅指令变更时同步（生产推荐）；force_startup：每次启动都同步（开发/强制重同步）；cleanup：清空已注册指令。",
+        "labels": [
+          "关闭",
+          "仅变更时同步",
+          "每次启动强制同步",
+          "清空指令"
+        ]
+      },
+      "discord_enable_user_install": {
+        "description": "允许个人安装(User Install)",
+        "hint": "允许用户将斜杠指令装到个人账号，在私信等处使用。需在 Developer Portal 勾选 User Install，且仅在调试服务器 ID 留空时生效。"
+      },
+      "discord_command_schemas": {
+        "description": "Discord 指令注册表",
+        "hint": "点「编辑指令表」打开可视化编辑器，管理哪些插件指令注册为斜杠指令。留空时启动自动填入全部指令。"
+      },
+      "discord_guild_id_for_debug": {
+        "description": "指令同步调试服务器 ID",
+        "hint": "填入某个 Discord 服务器(Guild) ID 后，斜杠指令仅注册到该服务器并近乎即时同步，便于调试。留空则按全局注册，全局同步最长约 1 小时生效。"
+      },
+      "discord_message_mode": {
+        "description": "Discord 消息处理模式",
+        "hint": "mention_and_dm：仅处理 @机器人 和私信，无需特权 intent（推荐）；full_message：处理频道内所有消息，需在 Developer Portal 开启 MESSAGE CONTENT 与 SERVER MEMBERS 特权 intent。斜杠指令在两种模式下均可用。"
       },
       "discord_proxy": {
         "description": "Discord 代理地址",

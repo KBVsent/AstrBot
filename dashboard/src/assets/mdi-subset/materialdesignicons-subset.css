@@ -1,4 +1,4 @@
-/* Auto-generated MDI subset – 273 icons */
+/* Auto-generated MDI subset – 277 icons */
 /* Do not edit manually. Run: pnpm run subset-icons */
 
 @font-face {
@@ -404,10 +404,6 @@
   content: "\F0209";
 }
 
-.mdi-eye-outline::before {
-  content: "\F06D0";
-}
-
 .mdi-eyedropper::before {
   content: "\F020A";
 }
@@ -528,6 +524,10 @@
   content: "\F0279";
 }
 
+.mdi-format-list-checks::before {
+  content: "\F0756";
+}
+
 .mdi-frequently-asked-questions::before {
   content: "\F0EB4";
 }
@@ -542,6 +542,10 @@
 
 .mdi-function-variant::before {
   content: "\F0871";
+}
+
+.mdi-gesture-tap::before {
+  content: "\F0741";
 }
 
 .mdi-github::before {
@@ -824,8 +828,20 @@
   content: "\F040D";
 }
 
+.mdi-playlist-check::before {
+  content: "\F05C7";
+}
+
+.mdi-playlist-plus::before {
+  content: "\F0412";
+}
+
 .mdi-plus::before {
   content: "\F0415";
+}
+
+.mdi-plus-circle::before {
+  content: "\F0417";
 }
 
 .mdi-pound::before {

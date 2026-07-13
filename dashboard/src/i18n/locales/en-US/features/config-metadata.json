@@ -439,8 +439,30 @@
         "hint": "When enabled, AstrBot will receive messages from other Discord bots. Useful for bot-to-bot communication scenarios (e.g., message forwarding). Disabled by default."
       },
       "discord_command_register": {
-        "description": "Register Discord slash commands",
-        "hint": "When enabled, AstrBot will automatically register plugin commands as Discord slash commands"
+        "description": "Discord command sync strategy",
+        "hint": "When slash commands sync. off: register nothing; startup_if_changed: sync only when commands change (recommended); force_startup: sync on every startup (dev / force re-sync); cleanup: clear registered commands.",
+        "labels": [
+          "Off",
+          "Sync if changed",
+          "Force sync on startup",
+          "Clean up"
+        ]
+      },
+      "discord_enable_user_install": {
+        "description": "Allow User Install",
+        "hint": "Let users install slash commands to their account for use in DMs, etc. Requires enabling User Install in the Developer Portal, and only works when the debug guild ID is empty."
+      },
+      "discord_command_schemas": {
+        "description": "Discord Command Registry",
+        "hint": "Click 'Edit Command Registry' to open the visual editor and manage which plugin commands register as slash commands. Auto-filled with all commands on first startup when empty."
+      },
+      "discord_guild_id_for_debug": {
+        "description": "Debug Guild ID for Command Sync",
+        "hint": "When set to a Discord guild (server) ID, slash commands are registered only to that guild and sync almost instantly, which is handy for debugging. Leave empty to register globally; global sync can take up to ~1 hour to propagate."
+      },
+      "discord_message_mode": {
+        "description": "Discord Message Mode",
+        "hint": "mention_and_dm: only handle messages that @mention the bot and DMs, no privileged intents required (recommended); full_message: handle all messages in channels, requires enabling the MESSAGE CONTENT and SERVER MEMBERS privileged intents in the Developer Portal. Slash commands work in both modes."
       },
       "discord_proxy": {
         "description": "Discord Proxy URL",

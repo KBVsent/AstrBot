@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 
+from astrbot.api import logger
 from astrbot.dashboard.responses import error, ok
 from astrbot.dashboard.schemas import (
     ConfigContentRequest,
@@ -221,6 +222,27 @@ async def get_dashboard_alias_default_config(
     service: ConfigProfileService = Depends(get_service),
 ):
     return ok(service.get_profile_schema())
+
+
+@legacy_router.get("/platform/discover-commands")
+async def discover_discord_commands(
+    _auth: AuthContext = Depends(require_config_scope),
+):
+    """发现当前可注册为 Discord 斜杠指令的插件指令，供注册表编辑器「添加/同步」。
+
+    返回默认注册表（键=指令名，值=默认条目），与适配器自动播种产物同形状。
+    无实例状态依赖，平台被禁用时也可用。
+    """
+    try:
+        from astrbot.core.platform.sources.discord.discord_platform_adapter import (
+            DiscordPlatformAdapter,
+        )
+
+        schemas = DiscordPlatformAdapter._discover_default_schemas()
+        return ok({"schemas": schemas})
+    except Exception as e:
+        logger.error(f"发现 Discord 可注册指令失败: {e}", exc_info=True)
+        return error(str(e))
 
 
 @legacy_router.get("/abconfs")
