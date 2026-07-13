@@ -1729,6 +1729,17 @@ export const statsApi = {
       }),
     );
   },
+  topCommands(offsetSec?: number, limit?: number) {
+    return httpClient.get<ApiEnvelope<{ commands: any[] }>>(
+      '/api/stat/top-commands',
+      {
+        params: {
+          ...(offsetSec === undefined ? {} : { offset_sec: offsetSec }),
+          ...(limit === undefined ? {} : { limit }),
+        },
+      },
+    );
+  },
   version() {
     return withLegacyFallback<VersionData>(openApiV1.getVersion(), () =>
       httpClient.get<ApiEnvelope<VersionData>>('/api/stat/version'),

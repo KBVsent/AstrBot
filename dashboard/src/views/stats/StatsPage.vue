@@ -434,12 +434,7 @@ async function fetchProviderStats(): Promise<void> {
 }
 
 async function fetchCommandStats(): Promise<void> {
-  const response = await axios.get('/api/stat/top-commands', {
-    params: {
-      offset_sec: selectedRange.value * 24 * 60 * 60,
-      limit: 100
-    }
-  })
+  const response = await statsApi.topCommands(selectedRange.value * 24 * 60 * 60, 100)
   commandStats.value = response.data.data?.commands ?? []
 }
 
