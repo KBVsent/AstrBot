@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import contextlib
 import traceback
 
 from astrbot.core import LogBroker, logger
@@ -45,13 +46,19 @@ class InitialLoader:
         )
 
         coro = self.dashboard_server.run()
-        if coro:
+        dashboard_task = asyncio.ensure_future(coro) if coro else None
+        if dashboard_task:
             # 启动核心任务和仪表板服务器
-            task = asyncio.gather(core_task, coro)
+            task = asyncio.gather(core_task, asyncio.shield(dashboard_task))
         else:
             task = core_task
         try:
             await task  # 整个AstrBot在这里运行
         except asyncio.CancelledError:
             logger.info("🌈 正在关闭 AstrBot...")
+            if dashboard_task:
+                # 先触发 dashboard 优雅退出并等待其正常结束
+                core_lifecycle.dashboard_shutdown_event.set()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await dashboard_task
             await core_lifecycle.stop()
