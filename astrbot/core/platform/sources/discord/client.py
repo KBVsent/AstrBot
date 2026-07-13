@@ -16,24 +16,38 @@ class DiscordBotClient(discord.Bot):
     """Discord客户端封装"""
 
     def __init__(
-        self, token: str, proxy: str | None = None, allow_bot_messages: bool = False
+        self,
+        token: str,
+        proxy: str | None = None,
+        allow_bot_messages: bool = False,
+        message_mode: str = "mention_and_dm",
     ) -> None:
         self.token = token
         self.proxy = proxy
         self.allow_bot_messages = allow_bot_messages
+        self.message_mode = message_mode
 
-        # 设置Intent权限，遵循权限最小化原则
+        # 设置Intent权限，遵循权限最小化原则。
+        # default() 本身已关闭 message_content / members 两个特权 intent，
+        # 仅 full_message 模式才需要订阅频道全部消息正文与成员事件。
         intents = discord.Intents.default()
-        intents.message_content = True  # 订阅消息内容事件 (Privileged)
-        intents.members = True  # 订阅成员事件 (Privileged)
+        if message_mode == "full_message":
+            intents.message_content = True  # 订阅消息内容事件 (Privileged)
+            intents.members = True  # 订阅成员事件 (Privileged)
 
         # 初始化Bot
-        super().__init__(intents=intents, proxy=proxy)
+        # 指令同步完全由适配器的 _sync_commands_by_mode 接管，故必须关掉这个自动同步。
+        super().__init__(intents=intents, proxy=proxy, auto_sync_commands=False)
 
         # 回调函数
         self.on_message_received: Callable[[dict], Awaitable[None]] | None = None
+        # 组件交互（按钮 / select / modal 提交）回调；slash 仍走 Pycord 原生通道。
+        self.on_interaction_received: Callable[[dict], Awaitable[None]] | None = None
         self.on_ready_once_callback: Callable[[], Awaitable[None]] | None = None
         self._ready_once_fired = False
+        # 命令名/别名 → Discord 原生 mention 字符串（</slash_name:id>），当前 scope。
+        # 由适配器在 sync 成功 / 指纹命中加载已存 id 后填充；供事件透出给插件。
+        self.command_mention_map: dict[str, str] = {}
 
     async def on_ready(self) -> None:
         """当机器人成功连接并准备就绪时触发"""
@@ -82,6 +96,7 @@ class DiscordBotClient(discord.Bot):
         if interaction.user is None:
             raise ValueError("Interaction received without a valid user")
 
+        raw_data = getattr(interaction, "data", {}) or {}
         return {
             "interaction": interaction,
             "bot_id": str(self.user.id),
@@ -94,12 +109,46 @@ class DiscordBotClient(discord.Bot):
             else None,
             "guild_id": str(interaction.guild_id) if interaction.guild_id else None,
             "type": "interaction",
+            # custom_id：按钮 / select / modal 提交统一靠它路由
+            "custom_id": raw_data.get("custom_id", ""),
+            # select 菜单选中值
+            "values": raw_data.get("values", []),
+            # modal 提交：把各 InputText 扁平成 {input_custom_id: value}
+            "modal_values": self._extract_modal_values(interaction),
         }
 
+    @staticmethod
+    def _extract_modal_values(interaction: discord.Interaction) -> dict[str, str]:
+        """从 modal_submit 交互里提取各输入框的值，扁平成 {custom_id: value}。
+
+        Discord modal 的 data.components 是一组 action row，每个 row 内含一个 InputText 组件。
+        非 modal 交互返回空 dict。
+        """
+        if interaction.type != discord.InteractionType.modal_submit:
+            return {}
+        out: dict[str, str] = {}
+        raw_data = getattr(interaction, "data", {}) or {}
+        for row in raw_data.get("components", []) or []:
+            for comp in row.get("components", []) or []:
+                cid = comp.get("custom_id")
+                if cid is not None:
+                    out[cid] = comp.get("value", "")
+        return out
+
     async def on_message(self, message: discord.Message) -> None:
-        """当接收到消息时触发"""
+        """当接收到消息时触发。
+
+        slash command 不经此处（走 Pycord interaction 通道），故两种模式下都可用。
+        mention_and_dm 模式仅处理 @bot 或私信（无特权 intent 时 Discord 也会下发这两类消息的正文）。
+        """
         if message.author.bot and not self.allow_bot_messages:
             return
+
+        if self.message_mode != "full_message":
+            is_dm = message.guild is None
+            is_mention = bool(self.user and self.user in message.mentions)
+            if not (is_dm or is_mention):
+                return
 
         logger.debug(
             f"[Discord] Received raw message from {message.author.name}: {message.content}",
@@ -108,6 +157,34 @@ class DiscordBotClient(discord.Bot):
         if self.on_message_received:
             message_data = self._create_message_data(message)
             await self.on_message_received(message_data)
+
+    async def on_interaction(self, interaction: discord.Interaction) -> None:
+        """处理交互。
+
+        - component（按钮 / select）/ modal_submit → 路由进 pipeline（统一靠 custom_id）。
+        - application_command（slash）/ autocomplete → 交回 Pycord 原生处理，不破坏现有 slash。
+
+        关键事实：Pycord 收到 component 交互时既派发内部 View store 又触发本事件，故无需注册
+        持久 View 回调，统一在此路由即可。
+        """
+        if interaction.type in (
+            discord.InteractionType.component,
+            discord.InteractionType.modal_submit,
+        ):
+            if self.on_interaction_received:
+                try:
+                    interaction_data = self._create_interaction_data(interaction)
+                except Exception as e:
+                    logger.error(
+                        f"[Discord] Failed to build interaction data: {e}",
+                        exc_info=True,
+                    )
+                    return
+                await self.on_interaction_received(interaction_data)
+            return
+
+        # slash / autocomplete 等仍走 Pycord 原生命令处理
+        await self.process_application_commands(interaction)
 
     def _extract_interaction_content(self, interaction: discord.Interaction) -> str:
         """从交互中提取内容"""

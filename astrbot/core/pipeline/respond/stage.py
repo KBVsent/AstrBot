@@ -8,6 +8,12 @@ from astrbot.core import logger
 from astrbot.core.message.components import BaseMessageComponent, ComponentType
 from astrbot.core.message.message_event_result import MessageChain, ResultContentType
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.sources.discord.components import (
+    DiscordButton,
+    DiscordEmbed,
+    DiscordSelect,
+    DiscordView,
+)
 from astrbot.core.platform.sources.qqofficial.components import QQCButton, QQCKeyboard
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.path_util import path_Mapping
@@ -51,6 +57,13 @@ class RespondStage(Stage):
         # QQ 官方平台按钮（Keyboard）
         QQCButton: lambda comp: bool(comp.id),
         QQCKeyboard: lambda comp: bool(comp.rows),
+        # Discord 平台组件（Embed / View / 按钮 / Select）
+        DiscordEmbed: lambda comp: bool(
+            comp.title or comp.description or comp.fields or comp.image or comp.thumbnail
+        ),
+        DiscordView: lambda comp: bool(comp.components),
+        DiscordButton: lambda comp: bool(comp.label or comp.custom_id or comp.url),
+        DiscordSelect: lambda comp: bool(comp.custom_id),
     }
 
     async def initialize(self, ctx: PipelineContext) -> None:

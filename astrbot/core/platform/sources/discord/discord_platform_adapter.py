@@ -1,4 +1,7 @@
 import asyncio
+import hashlib
+import inspect
+import json
 import re
 import sys
 from typing import Any, cast
@@ -9,7 +12,7 @@ from discord.channel import DMChannel
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import File, Image, Plain, Record
+from astrbot.api.message_components import At, File, Image, Plain, Record
 from astrbot.api.platform import (
     AstrBotMessage,
     MessageMember,
@@ -33,6 +36,10 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import override
 
+from discord.commands.core import valid_locales as _DISCORD_VALID_LOCALES
+
+_DISCORD_VALID_LOCALE_SET = frozenset(_DISCORD_VALID_LOCALES)
+
 
 # 注册平台适配器
 @register_platform_adapter(
@@ -50,11 +57,28 @@ class DiscordPlatformAdapter(Platform):
         self.bot_self_id: str | None = None
         self.registered_handlers = []
         # 指令注册相关
-        self.enable_command_register = self.config.get("discord_command_register", True)
-        self.guild_id = self.config.get("discord_guild_id_for_debug", None)
+        # 同步策略枚举（off / startup_if_changed / force_startup / cleanup），存于 discord_command_register。
+        # 该键由旧布尔开关复用而来：旧实例存盘里是 bool（True/False），不在枚举集合内 → 回退默认，
+        # WebUI 下拉对旧 bool 值显示空白，促使用户在更新后重新选择一次。
+        mode = self.config.get("discord_command_register")
+        if mode not in ("off", "startup_if_changed", "force_startup", "cleanup"):
+            mode = "startup_if_changed"
+        self.command_register_mode = mode
+        # 个人安装(User Install)：斜杠指令额外支持装到个人账号，可在私信/群组私聊/任意服务器使用。
+        # 仅全局注册(无调试 guild)时生效；详见 _build_and_add_commands。
+        self.enable_user_install = self.config.get("discord_enable_user_install", True)
+        # 消息模式：mention_and_dm（默认，零特权 intent）/ full_message（旧行为，需特权）。
+        # 旧实例存盘里没有该 key，必须写显式 fallback（DEFAULT_CONFIG.platform=[] 不会回填实例字段）。
+        self.message_mode = self.config.get("discord_message_mode", "mention_and_dm")
+        if self.message_mode not in ("mention_and_dm", "full_message"):
+            self.message_mode = "mention_and_dm"
+        # 空字符串（schema 默认）按"无调试服务器"处理，走全局注册
+        self.guild_id = self.config.get("discord_guild_id_for_debug") or None
         self.activity_name = self.config.get("discord_activity_name", None)
         self.shutdown_event = asyncio.Event()
         self._polling_task = None
+        # slash_name → 底层命令名(cmd_name)，build 时填充；用于把命令 id 同时按这两个规范标识写进 mention 映射
+        self._slash_to_cmd_name: dict[str, str] = {}
 
     @override
     async def send_by_session(
@@ -85,11 +109,11 @@ class DiscordPlatformAdapter(Platform):
             message_obj.type = self._get_message_type(channel)
             message_obj.group_id = self._get_channel_id(channel)
         else:
-            logger.warning(
-                f"[Discord] Can't get channel info for {channel_id_str}, will guess message type.",
+            logger.error(
+                f"[Discord] Proactive send failed: cannot resolve channel {channel_id_str} "
+                "(bot may not be in the guild, or the channel does not exist)."
             )
-            message_obj.type = MessageType.GROUP_MESSAGE
-            message_obj.group_id = session.session_id
+            return
 
         message_obj.message_str = message_chain.get_plain_text()
         message_obj.sender = MessageMember(
@@ -127,6 +151,14 @@ class DiscordPlatformAdapter(Platform):
             abm = await self.convert_message(data=message_data)
             await self.handle_msg(abm)
 
+        async def on_interaction_received(interaction_data) -> None:
+            # 组件交互（按钮 / select / modal 提交）入站：转 ABM 后进 pipeline。
+            logger.debug(f"[Discord] Interaction received: {interaction_data}")
+            if self.bot_self_id is None:
+                self.bot_self_id = interaction_data.get("bot_id")
+            abm = await self.convert_message(data=interaction_data)
+            await self.handle_msg(abm)
+
         # 初始化 Discord 客户端
         token = str(self.config.get("discord_token"))
         if not token:
@@ -137,13 +169,15 @@ class DiscordPlatformAdapter(Platform):
 
         proxy = self.config.get("discord_proxy") or None
         allow_bot_messages = bool(self.config.get("discord_allow_bot_messages"))
-        self.client = DiscordBotClient(token, proxy, allow_bot_messages)
+        self.client = DiscordBotClient(
+            token, proxy, allow_bot_messages, self.message_mode
+        )
         self.client.on_message_received = on_received
+        self.client.on_interaction_received = on_interaction_received
 
         async def callback() -> None:
             try:
-                if self.enable_command_register:
-                    await self._collect_and_register_commands()
+                await self._sync_commands_by_mode()
                 if self.activity_name:
                     await self.client.change_presence(
                         status=discord.Status.online,
@@ -156,8 +190,22 @@ class DiscordPlatformAdapter(Platform):
 
         self.client.on_ready_once_callback = callback
 
+        def _on_polling_done(task: asyncio.Task) -> None:
+            # start_polling 跑在独立 task 里，其异常（如特权 intent 未授权抛出的
+            # PrivilegedIntentsRequired、LoginFailure）不会冒泡到下面的 try/except，
+            # 不在此显式打日志就会被静默吞掉、适配器一直挂在 shutdown_event.wait()。
+            if task.cancelled():
+                return
+            exc = task.exception()
+            if exc is not None:
+                logger.error(
+                    f"[Discord] Polling task exited unexpectedly: {exc}", exc_info=exc
+                )
+                self.shutdown_event.set()
+
         try:
             self._polling_task = asyncio.create_task(self.client.start_polling())
+            self._polling_task.add_done_callback(_on_polling_done)
             await self.shutdown_event.wait()
         except discord.errors.LoginFailure:
             logger.error(
@@ -195,33 +243,31 @@ class DiscordPlatformAdapter(Platform):
 
         content = message.content
 
-        # 如果机器人被@，移除@部分
-        # 剥离 User Mention (<@id>, <@!id>)
-        if self.client and self.client.user:
-            mention_str = f"<@{self.client.user.id}>"
-            mention_str_nickname = f"<@!{self.client.user.id}>"
-            if content.startswith(mention_str):
-                content = content[len(mention_str) :].lstrip()
-            elif content.startswith(mention_str_nickname):
-                content = content[len(mention_str_nickname) :].lstrip()
+        # 解析正文里的用户 @：按出现顺序
+        at_components: list[At] = []
+        for match in re.finditer(r"<@!?(\d+)>", content):
+            mid = match.group(1)
+            at_components.append(At(qq=mid))
 
-        # 剥离 Role Mention（bot 拥有的任一角色被提及，<@&role_id>）
+        # 剥离全部用户 mention 标记（含 bot 与他人），避免雪花 ID 污染位置参数
+        content = re.sub(r"<@!?\d+>", "", content)
+
+        # 剥离 Role Mention（bot 拥有的任一角色被提及，<@&role_id>）：角色@仅用于唤醒，不转 At，
+        # 仅从文本清理 bot 角色 mention（角色@唤醒，full_message 模式）。
         if (
             hasattr(message, "role_mentions")
             and hasattr(message, "guild")
             and message.guild
+            and self.client
+            and self.client.user
         ):
-            bot_member = (
-                message.guild.get_member(self.client.user.id)
-                if self.client and self.client.user
-                else None
-            )
+            bot_member = message.guild.get_member(self.client.user.id)
             if bot_member and hasattr(bot_member, "roles"):
                 for role in bot_member.roles:
-                    role_mention_str = f"<@&{role.id}>"
-                    if content.startswith(role_mention_str):
-                        content = content[len(role_mention_str) :].lstrip()
-                        break  # 只剥离第一个匹配的角色 mention
+                    content = content.replace(f"<@&{role.id}>", "")
+
+        # 收敛多余空格
+        content = re.sub(r"\s{2,}", " ", content).strip()
 
         abm = AstrBotMessage()
         abm.type = self._get_message_type(message.channel)
@@ -234,6 +280,7 @@ class DiscordPlatformAdapter(Platform):
         message_chain = []
         if abm.message_str:
             message_chain.append(Plain(text=abm.message_str))
+        message_chain.extend(at_components)
         if message.attachments:
             for attachment in message.attachments:
                 if attachment.content_type and attachment.content_type.startswith(
@@ -259,10 +306,48 @@ class DiscordPlatformAdapter(Platform):
         abm.message_id = str(message.id)
         return abm
 
+    def _convert_interaction_to_abm(self, data: dict) -> AstrBotMessage:
+        """将组件交互（按钮 / select / modal 提交）转换为 AstrBotMessage。
+
+        交互不靠文本路由，靠 custom_id；message_str 留空，由处理器
+        自行从 custom_id 改写。raw_message 设为 discord.Interaction，使事件的
+        is_button_interaction()/get_interaction_custom_id() 等生效。
+        """
+        interaction: discord.Interaction = data["interaction"]
+        channel = interaction.channel
+
+        abm = AstrBotMessage()
+        if channel is not None:
+            abm.type = self._get_message_type(channel, interaction.guild_id)
+            abm.group_id = self._get_channel_id(channel)
+        else:
+            abm.type = (
+                MessageType.GROUP_MESSAGE
+                if interaction.guild_id is not None
+                else MessageType.FRIEND_MESSAGE
+            )
+            abm.group_id = str(interaction.channel_id)
+
+        # 交互不靠文本路由（处理器读 custom_id），message_str/message 均留空——避免触发命令匹配
+        abm.message_str = ""
+        abm.message = []
+        abm.sender = MessageMember(
+            user_id=str(interaction.user.id) if interaction.user else "",
+            nickname=interaction.user.display_name if interaction.user else "",
+        )
+        abm.raw_message = interaction
+        abm.self_id = cast(str, self.bot_self_id)
+        abm.session_id = str(interaction.channel_id)
+        abm.message_id = str(interaction.id)
+        return abm
+
     async def convert_message(self, data: dict) -> AstrBotMessage:
-        """将平台消息转换成 AstrBotMessage"""
-        # 由于 on_interaction 已被禁用，我们只处理普通消息
-        abm = self._convert_message_to_abm(data)
+        """将平台消息转换成 AstrBotMessage（普通消息 / 组件交互两类）"""
+        if data.get("type") == "interaction":
+            abm = self._convert_interaction_to_abm(data)
+        else:
+            abm = self._convert_message_to_abm(data)
+        # 统一把 Record 媒体解析成本地 wav（media 统一，#7c366a708）
         for component in abm.message:
             if isinstance(component, Record):
                 audio_ref = component.url or component.file
@@ -278,13 +363,17 @@ class DiscordPlatformAdapter(Platform):
         return abm
 
     def create_event(
-        self, message: AstrBotMessage, followup_webhook=None
+        self,
+        message: AstrBotMessage,
+        followup_webhook=None,
+        is_ephemeral: bool = False,
     ) -> DiscordPlatformEvent:
         """Creates a Discord message event.
 
         Args:
             message: AstrBot message object to wrap.
             followup_webhook: Optional slash-command follow-up webhook.
+            is_ephemeral: Whether the slash-command reply should be ephemeral.
 
         Returns:
             Created Discord message event.
@@ -296,11 +385,23 @@ class DiscordPlatformAdapter(Platform):
             session_id=message.session_id,
             client=self.client,
             interaction_followup_webhook=followup_webhook,
+            is_ephemeral=is_ephemeral,
         )
 
-    async def handle_msg(self, message: AstrBotMessage, followup_webhook=None) -> None:
+    async def handle_msg(
+        self,
+        message: AstrBotMessage,
+        followup_webhook=None,
+        user_locale: str | None = None,
+        ephemeral: bool = False,
+    ) -> None:
         """处理消息"""
-        message_event = self.create_event(message, followup_webhook)
+        message_event = self.create_event(message, followup_webhook, ephemeral)
+
+        # slash interaction 自带用户客户端 locale，放进事件 extras 供业务侧做语言判定/seed。
+        # on_message（@bot/DM）路径无此信息，user_locale 为 None 不写。
+        if user_locale:
+            message_event.set_extra("user_locale", user_locale)
 
         if self.client.user is None:
             logger.error(
@@ -318,7 +419,13 @@ class DiscordPlatformAdapter(Platform):
             self.commit_event(message_event)
             return
 
-        # 2. 处理普通消息（提及检测）
+        # 2. 组件交互（按钮 / select / modal 提交）：raw_message 是 discord.Interaction。
+        if isinstance(message.raw_message, discord.Interaction):
+            message_event.is_wake = True
+            self.commit_event(message_event)
+            return
+
+        # 3. 处理普通消息（提及检测）
         # 确保 raw_message 是 discord.Message 类型，以便静态检查通过
         raw_message = message.raw_message
         if not isinstance(raw_message, discord.Message):
@@ -335,8 +442,13 @@ class DiscordPlatformAdapter(Platform):
         if self.client.user in raw_message.mentions:
             is_mention = True
 
-        # Role Mention（Bot 拥有的角色被提及）
-        if not is_mention and raw_message.role_mentions:
+        # Role Mention（Bot 拥有的角色被提及）：依赖 members intent 解析 bot 角色，
+        # 仅 full_message 模式可用；其余模式无 members intent，跳过角色@唤醒。
+        if (
+            self.message_mode == "full_message"
+            and not is_mention
+            and raw_message.role_mentions
+        ):
             bot_member = None
             if raw_message.guild:
                 try:
@@ -366,21 +478,8 @@ class DiscordPlatformAdapter(Platform):
     async def terminate(self) -> None:
         logger.info("[Discord] Shutting down adapter...")
         self.shutdown_event.set()
-        logger.info("[Discord] Cleaning up commands...")
-        if self.enable_command_register and self.client:
-            try:
-                await asyncio.wait_for(
-                    self.client.sync_commands(
-                        commands=[],
-                        guild_ids=[self.guild_id] if self.guild_id else None,
-                    ),
-                    timeout=10,
-                )
-                logger.info("[Discord] Commands cleaned up successfully.")
-            except Exception as e:
-                logger.warning(
-                    f"[Discord] Error occurred while cleaning up commands: {e}"
-                )
+        # 关闭时不再清理已注册指令：清理改由 discord_command_register='cleanup' 显式触发，
+        # 避免每次重启/重载都对 Discord 发清空请求（全局清空易撞限速 stall 并超时）。
 
         if self._polling_task:
             self._polling_task.cancel()
@@ -404,59 +503,249 @@ class DiscordPlatformAdapter(Platform):
         """注册处理器信息"""
         self.registered_handlers.append(handler_info)
 
-    async def _collect_and_register_commands(self) -> None:
-        """收集所有指令并注册到Discord"""
-        logger.info("[Discord] Collecting and registering slash commands...")
-        registered_commands = []
+    # 全局指令同步超时（秒）。全局注册可能撞 Discord 限速 stall，超时兜底避免无声永久挂起。
+    _SYNC_TIMEOUT = 60
 
-        for handler_md in star_handlers_registry:
-            if not star_map[handler_md.handler_module_path].activated:
-                continue
-            if not handler_md.enabled:
-                continue
-            for event_filter in handler_md.event_filters:
-                cmd_info = self._extract_command_info(event_filter, handler_md)
-                if not cmd_info:
-                    continue
+    @staticmethod
+    def _scope_label(scope: str | None) -> str:
+        """作用域日志标签：None→'global'；guild id→'guild <id>'。"""
+        return f"guild {scope}" if scope else "global"
 
-                cmd_name, description, cmd_filter_instance = cmd_info
-
-                # 创建动态回调
-                callback = self._create_dynamic_callback(cmd_name)
-
-                # 创建一个通用的参数选项来接收所有文本输入
-                options = [
-                    discord.Option(
-                        name="params",
-                        description="指令的所有参数",
-                        type=discord.SlashCommandOptionType.string,
-                        required=False,
-                    ),
-                ]
-
-                # 创建SlashCommand
-                slash_command = discord.SlashCommand(
-                    name=cmd_name,
-                    description=description,
-                    func=callback,
-                    options=options,
-                    guild_ids=[self.guild_id] if self.guild_id else None,
-                )
-                self.client.add_application_command(slash_command)
-                registered_commands.append(cmd_name)
-
-        if registered_commands:
-            logger.info(
-                f"[Discord] Ready to sync {len(registered_commands)} commands: {', '.join(registered_commands)}",
+    async def _clear_scope_commands(self, guild_id: str | None) -> bool:
+        """精确清空某作用域的全部斜杠指令：guild_id 给定→只清该 guild；None→清全局"""
+        client = self.client
+        app_id = client.application_id or (client.user.id if client.user else None)
+        if not app_id:
+            logger.warning(
+                "[Discord] Cannot clear commands: application id unavailable."
             )
-        else:
-            logger.info("[Discord] No commands found for registration.")
-
-        # 使用 Pycord 的方法同步指令
-        # 注意：这可能需要一些时间，并且有频率限制
+            return False
+        label = self._scope_label(guild_id)
         try:
-            await self.client.sync_commands()
+            if guild_id:
+                coro = client.http.bulk_upsert_guild_commands(app_id, int(guild_id), [])
+            else:
+                coro = client.http.bulk_upsert_global_commands(app_id, [])
+            await asyncio.wait_for(coro, timeout=self._SYNC_TIMEOUT)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Discord] Clearing {label} commands timed out after {self._SYNC_TIMEOUT}s."
+            )
+            return False
+        except Exception as e:
+            logger.warning(f"[Discord] Failed to clear {label} commands: {e}")
+            return False
+
+    async def _sync_commands_by_mode(self) -> None:
+        """按 discord_command_register 决定是否/如何把斜杠指令同步到 Discord。
+
+        作用域由 discord_guild_id_for_debug 决定（设了→guild 即时；留空→全局 + user install）。
+        无论是否真正 sync，都先 build + add_application_command：Pycord 路由进来的交互按
+        id 查不到会回退按指令名匹配 pending 指令，故"build 但跳过 sync"时交互仍可响应。
+        """
+        mode = self.command_register_mode
+
+        if mode == "off":
+            logger.info(
+                "[Discord] Command register mode is 'off'; no slash commands registered."
+            )
+            return
+
+        if mode == "cleanup":
+            # 只清当前配置的作用域（guild→只清该 guild；global→清全局）。
+            logger.info(
+                "[Discord] Command register mode is 'cleanup'; clearing slash commands on "
+                f"{self._scope_label(self.guild_id)}..."
+            )
+            if await self._clear_scope_commands(self.guild_id):
+                self._store_synced_fingerprint(None)
+                self._store_command_ids(None)
+                self.client.command_mention_map = {}
+                logger.info(
+                    "[Discord] Slash commands cleaned up. If commands were previously "
+                    "registered to a different scope (e.g. a debug guild), set that guild "
+                    "id in discord_guild_id_for_debug and run cleanup again to remove them."
+                )
+            return
+
+        # startup_if_changed / force_startup
+        built = self._build_and_add_commands()
+        if not built:
+            return
+
+        fingerprint = self._compute_command_fingerprint(built)
+        if (
+            mode == "startup_if_changed"
+            and fingerprint == self._load_synced_fingerprint()
+        ):
+            # 指纹命中 ⇒ 命令集/scope 未变 ⇒ 复用已存 id（别名映射本轮 build 已重建）。
+            self._apply_command_ids(self._load_command_ids())
+            logger.info(
+                f"[Discord] Slash commands unchanged since last sync; skipping sync "
+                f"({len(built)} commands remain routable)."
+            )
+            return
+
+        if await self._sync_commands_guarded():
+            self._store_synced_fingerprint(fingerprint)
+            ids = {c.name: c.id for c in built if c.id}
+            self._store_command_ids(ids)
+            self._apply_command_ids(ids)
             logger.info("[Discord] Command synchronization completed.")
+
+    def _build_and_add_commands(self) -> list[discord.SlashCommand] | None:
+        """按指令注册表（discord_command_schemas）构建并 add_application_command。
+
+        不触发同步，仅把指令登记到 client.pending（用于路由）。返回构建出的指令列表；
+        注册表 JSON 非法或为空时返回 None（已记录日志）。
+        注册表为空时自动发现全部已激活指令并持久化（仅一次），之后保留用户编辑。
+        """
+        schemas = self._load_or_seed_command_schemas()
+        if schemas is None:
+            # JSON 解析失败，已记录日志；中止注册，避免破坏用户数据。
+            return None
+        if not schemas:
+            logger.info(
+                "[Discord] Command schema table is empty; no slash commands registered."
+            )
+            return None
+
+        logger.info("[Discord] Registering slash commands from schema table...")
+        built_commands: list[discord.SlashCommand] = []
+        used_slash_names: set[str] = set()
+        # 每次 build 重建 slash_name → cmd_name（不持久化，只 id 持久化）。
+        self._slash_to_cmd_name = {}
+
+        # 个人安装(User Install)与上下文：仅在全局注册(无调试 guild)时启用。
+        # guild_ids 指定的服务器专属指令与 user_install 互斥，且不接受 contexts，故此时跳过。
+        install_kwargs: dict[str, Any] = {}
+        if self.enable_user_install and not self.guild_id:
+            install_kwargs["integration_types"] = {
+                discord.IntegrationType.guild_install,
+                discord.IntegrationType.user_install,
+            }
+            install_kwargs["contexts"] = {
+                discord.InteractionContextType.guild,
+                discord.InteractionContextType.bot_dm,
+                discord.InteractionContextType.private_channel,
+            }
+            logger.info(
+                "[Discord] User install enabled: slash commands support guild + user "
+                "installation, usable in guilds / DMs / private channels."
+            )
+        elif self.enable_user_install and self.guild_id:
+            logger.info(
+                "[Discord] User install requested but a debug guild ID is set; "
+                "registering guild-scoped commands only (user install disabled)."
+            )
+
+        for cmd_name, entry in schemas.items():
+            if not isinstance(entry, dict):
+                logger.warning(
+                    f"[Discord] Skipping schema entry '{cmd_name}': not a JSON object."
+                )
+                continue
+            if not entry.get("enabled", True):
+                continue
+
+            slash_name = str(entry.get("slash_name") or cmd_name).strip()
+            if not re.match(r"^[a-z0-9_-]{1,32}$", slash_name):
+                logger.warning(
+                    f"[Discord] Skipping '{cmd_name}': invalid slash name '{slash_name}' "
+                    "(must match ^[a-z0-9_-]{1,32}$)."
+                )
+                continue
+            if slash_name in used_slash_names:
+                logger.warning(
+                    f"[Discord] Skipping '{cmd_name}': duplicate slash name '{slash_name}'."
+                )
+                continue
+
+            description = (str(entry.get("description") or f"Command: {cmd_name}"))[
+                :100
+            ]
+            options = self._build_options(entry.get("options"))
+            # ephemeral 私密响应：per-trigger 静态位，defer 时刻锁定（事件还没进 pipeline）。
+            ephemeral = bool(entry.get("ephemeral", False))
+
+            # 回调用底层指令名（注册表的键）构造 message_str，
+            # 保证自定义 slash_name 也能路由回原指令。
+            callback = self._create_dynamic_callback(cmd_name, len(options), ephemeral)
+
+            slash_kwargs: dict[str, Any] = {
+                "name": slash_name,
+                "description": description,
+                "func": callback,
+                "options": options,
+                "guild_ids": [self.guild_id] if self.guild_id else None,
+                **install_kwargs,
+            }
+            desc_localizations = self._filter_localizations(
+                entry.get("description_localizations")
+            )
+            if desc_localizations:
+                slash_kwargs["description_localizations"] = desc_localizations
+
+            command = discord.SlashCommand(**slash_kwargs)
+            self.client.add_application_command(command)
+            used_slash_names.add(slash_name)
+            built_commands.append(command)
+            self._slash_to_cmd_name[slash_name] = cmd_name
+
+        if not built_commands:
+            logger.info("[Discord] No commands found for registration.")
+            return None
+
+        logger.info(
+            f"[Discord] Built {len(built_commands)} commands: "
+            f"{', '.join(c.name for c in built_commands)}",
+        )
+        if len(built_commands) > 100 and not self.guild_id:
+            logger.warning(
+                "[Discord] More than 100 global slash commands configured; Discord "
+                "caps global commands at 100. Disable unneeded ones via "
+                "'enabled': false in discord_command_schemas, or set a debug guild ID.",
+            )
+        return built_commands
+
+    async def _sync_commands_guarded(
+        self,
+        *,
+        commands: list[discord.SlashCommand] | None = None,
+        guild_ids: list[int] | None = None,
+    ) -> bool:
+        """带超时与错误兜底地调用 Pycord sync_commands；永不外抛，返回是否成功。
+
+        commands=[] 用于清空；commands=None 走 client.pending（各指令自带 guild_ids）。
+        """
+        kwargs: dict[str, Any] = {}
+        if commands is not None:
+            kwargs["commands"] = commands
+            if guild_ids is not None:
+                kwargs["guild_ids"] = guild_ids
+        try:
+            await asyncio.wait_for(
+                self.client.sync_commands(**kwargs), timeout=self._SYNC_TIMEOUT
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Discord] Command sync timed out after {self._SYNC_TIMEOUT}s "
+                "(likely a Discord global rate-limit stall on command registration). "
+                "Commands were not synced this round; set a debug guild ID for instant, "
+                "separately-rate-limited guild registration.",
+            )
+            return False
+        except RuntimeError as e:
+            # reload 后旧 client 的 on_ready task 醒来时 session 已关，会抛 "Session is closed"。
+            if "Session is closed" in str(e):
+                logger.warning(
+                    "[Discord] Command sync aborted: HTTP session already closed "
+                    "(stale on_ready task after adapter reload).",
+                )
+                return False
+            raise
         except discord.HTTPException as e:
             if self._is_daily_command_quota_error(e):
                 logger.warning(
@@ -464,46 +753,423 @@ class DiscordPlatformAdapter(Platform):
                     "(30034); command sync skipped. Existing commands should "
                     "continue to work until the quota resets.",
                 )
-                return
+                return False
             logger.warning(f"[Discord] Sync commands failed: {e}")
+            return False
+
+    def _compute_command_fingerprint(self, commands: list[discord.SlashCommand]) -> str:
+        """对指令定义 + 作用域 + bot 身份算 sha256 指纹，用于变更检测。
+
+        含作用域与 bot id → 切换 guild↔global 或更换 bot 时自动失效重同步。
+        integration_types/contexts 由 set 推导成 list（顺序不稳定），先排序归一化。
+        """
+        bot_user_id = self.client.user.id if self.client and self.client.user else None
+        payloads: list[dict] = []
+        for command in commands:
+            payload = command.to_dict()
+            for key in ("integration_types", "contexts"):
+                if isinstance(payload.get(key), list):
+                    payload[key] = sorted(payload[key])
+            payloads.append(payload)
+        material = {
+            "scope": "guild" if self.guild_id else "global",
+            "guild_id": self.guild_id,
+            "user_install": bool(self.enable_user_install and not self.guild_id),
+            "bot_user_id": str(bot_user_id) if bot_user_id else None,
+            "commands": payloads,
+        }
+        blob = json.dumps(material, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    def _load_synced_fingerprint(self) -> str | None:
+        """读取上次成功同步的指令指纹（纯内部状态，不在 schema/WebUI 显示）。"""
+        return self.config.get("discord_command_synced_fingerprint") or None
+
+    def _store_synced_fingerprint(self, fingerprint: str | None) -> None:
+        """写入并持久化已同步指纹；None 表示清除（cleanup 后）。"""
+        self.config["discord_command_synced_fingerprint"] = fingerprint or ""
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Failed to persist command sync fingerprint: {e}. "
+                    "Next restart may re-sync unnecessarily.",
+                )
+
+    def _load_command_ids(self) -> dict[str, int]:
+        """读取已持久化的 slash_name → command id（纯内部状态，WebUI 隐藏）。"""
+        raw = self.config.get("discord_command_ids") or ""
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): int(v) for k, v in data.items() if v is not None}
+
+    def _store_command_ids(self, ids: dict[str, int] | None) -> None:
+        """持久化 slash_name → id；None 表示清除（cleanup 后）。"""
+        self.config["discord_command_ids"] = (
+            json.dumps(ids, ensure_ascii=False) if ids else ""
+        )
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Failed to persist command ids: {e}. "
+                    "Command mentions may be unavailable until next sync.",
+                )
+
+    def _apply_command_ids(self, ids: dict[str, int]) -> None:
+        """据 slash_name→id 构建 client.command_mention_map。
+
+        仅按规范标识建键：Discord slash 名 + 底层命令名（cmd_name），均指向其</slash_name:id>
+        """
+        mention_map: dict[str, str] = {}
+        for slash_name, cmd_id in ids.items():
+            mention = f"</{slash_name}:{cmd_id}>"
+            mention_map[slash_name] = mention
+            cmd_name = self._slash_to_cmd_name.get(slash_name)
+            if cmd_name:
+                mention_map.setdefault(cmd_name, mention)
+        self.client.command_mention_map = mention_map
 
     @staticmethod
     def _is_daily_command_quota_error(error: discord.HTTPException) -> bool:
         return getattr(error, "code", None) == 30034
 
-    def _create_dynamic_callback(self, cmd_name: str):
-        """为每个指令动态创建一个异步回调函数"""
+    def _load_or_seed_command_schemas(self) -> dict | None:
+        """读取指令注册表；为空则自动发现全部指令、播种并持久化。
+
+        返回注册表 dict；JSON 非法或结构错误时返回 None（中止注册，不动用户数据）。
+        """
+        raw = self.config.get("discord_command_schemas") or ""
+        if not raw.strip():
+            seeded = self._discover_default_schemas()
+            self._persist_seeded_schemas(seeded)
+            return seeded
+
+        try:
+            data = json.loads(raw)
+        except (ValueError, TypeError) as e:
+            logger.error(
+                f"[Discord] Failed to parse discord_command_schemas JSON: {e}. "
+                "Registration aborted; your config is left untouched.",
+            )
+            return None
+        if not isinstance(data, dict):
+            logger.error(
+                "[Discord] discord_command_schemas must be a JSON object keyed by "
+                "command name. Registration aborted.",
+            )
+            return None
+        return data
+
+    @staticmethod
+    def _discover_default_schemas() -> dict:
+        """发现全部已激活插件指令，生成默认注册表（每条=启用、slash 名=指令名、单 string 参数）。
+
+        无实例状态依赖（只走全局 registry），声明为 staticmethod 便于 WebUI 路由在没有
+        运行中适配器实例时也能调用（如平台被禁用）。
+        """
+        schemas: dict[str, dict] = {}
+        for handler_md in star_handlers_registry:
+            if not star_map[handler_md.handler_module_path].activated:
+                continue
+            if not handler_md.enabled:
+                continue
+            for event_filter in handler_md.event_filters:
+                cmd_info = DiscordPlatformAdapter._extract_command_info(
+                    event_filter, handler_md
+                )
+                if not cmd_info:
+                    continue
+                cmd_name, description, _ = cmd_info
+                if cmd_name in schemas:
+                    continue  # 同名指令多个 handler，首个为准
+                schemas[cmd_name] = {
+                    "enabled": True,
+                    "slash_name": cmd_name,
+                    "description": description,
+                    "description_localizations": {},
+                    "options": [
+                        {
+                            "name": "params",
+                            "description": "指令的所有参数",
+                            "type": "string",
+                            "description_localizations": {},
+                            "required": False,
+                        },
+                    ],
+                    "ephemeral": False,
+                }
+        return schemas
+
+    def _persist_seeded_schemas(self, schemas: dict) -> None:
+        """把播种出的注册表写回配置并持久化到 data/cmd_config.json。"""
+        self.config["discord_command_schemas"] = json.dumps(
+            schemas, ensure_ascii=False, indent=2
+        )
+        astrbot_config = self._astrbot_config
+        save_config = getattr(astrbot_config, "save_config", None)
+        if callable(save_config):
+            try:
+                save_config()
+                logger.info(
+                    f"[Discord] Seeded {len(schemas)} commands into "
+                    "discord_command_schemas and saved config. Edit it in the WebUI to "
+                    "customize slash names / descriptions / localizations.",
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Discord] Seeded commands but failed to persist config: {e}. "
+                    "Edits this run are in-memory only.",
+                )
+        else:
+            logger.warning(
+                "[Discord] Seeded commands in-memory only (config object unavailable); "
+                "they won't persist across restarts.",
+            )
+
+    def _build_options(self, raw_options: Any) -> list[discord.Option]:
+        """从注册表条目的 options 构造 Discord 选项；未指定时给单个通用 params 选项。
+
+        作为框架能力，支持 Discord 全部参数类型（见 ``type_map``）。触发时回调按值的实际类型
+        通用地映射进 AstrBot 消息模型（见 ``_create_dynamic_callback``）：标量入 message_str
+        文本、user→``Comp.At``、attachment→``Image``/``File``、channel/role→Discord mention 文本。
+        未知 type 告警回退 string。
+        """
+        # type 字段 → Discord 选项类型（覆盖全部可作参数的类型，scope 约定局部定义）
+        type_map = {
+            "string": discord.SlashCommandOptionType.string,
+            "integer": discord.SlashCommandOptionType.integer,
+            "number": discord.SlashCommandOptionType.number,
+            "boolean": discord.SlashCommandOptionType.boolean,
+            "user": discord.SlashCommandOptionType.user,
+            "channel": discord.SlashCommandOptionType.channel,
+            "role": discord.SlashCommandOptionType.role,
+            "mentionable": discord.SlashCommandOptionType.mentionable,
+            "attachment": discord.SlashCommandOptionType.attachment,
+        }
+        specs = (
+            raw_options
+            if isinstance(raw_options, list)
+            else [
+                {"name": "params", "description": "指令的所有参数", "required": False}
+            ]
+        )
+        options: list[discord.Option] = []
+        names: set[str] = set()
+        for spec in specs:
+            if not isinstance(spec, dict):
+                continue
+            name = str(spec.get("name") or "").strip()
+            if not re.match(r"^[a-z0-9_-]{1,32}$", name):
+                logger.warning(
+                    f"[Discord] Skipping option with invalid name: {spec.get('name')!r}"
+                )
+                continue
+            if name in names:
+                continue
+            opt_type = str(spec.get("type") or "string").strip().lower()
+            if opt_type not in type_map:
+                logger.warning(
+                    f"[Discord] Option '{name}': unknown type {opt_type!r}, "
+                    "falling back to 'string'."
+                )
+                opt_type = "string"
+            opt_kwargs: dict[str, Any] = {
+                "name": name,
+                "description": (str(spec.get("description") or name))[:100],
+                "required": bool(spec.get("required", False)),
+            }
+            loc = self._filter_localizations(spec.get("description_localizations"))
+            if loc:
+                opt_kwargs["description_localizations"] = loc
+            choices = self._build_choices(name, opt_type, spec.get("choices"))
+            if choices:
+                opt_kwargs["choices"] = choices
+            # input_type 是 discord.Option 的仅位置参数（签名 `/` 之前），必须位置传入；
+            # 用 type=/input_type= 关键字会被丢进 **kwargs 忽略、退回默认 string。
+            options.append(discord.Option(type_map[opt_type], **opt_kwargs))
+            names.add(name)
+        return options
+
+    def _build_choices(
+        self, opt_name: str, opt_type: str, raw_choices: Any
+    ) -> list[discord.OptionChoice]:
+        """从 option spec 的 choices 构造 Discord 原生下拉项；非 list/空时返回 []。
+
+        choice 的value 按 option 的 type 转型（string→str / integer→int / number→float），转型失败、
+        缺 name/value 或 string value 超 100 字符的项告警跳过。Discord 上限 25 项/选项，
+        超出截断并告警；choices 仅 string/integer/number 类型合法，其余类型带 choices 时整体忽略
+        """
+        if not isinstance(raw_choices, list) or not raw_choices:
+            return []
+        # Discord 仅 STRING/INTEGER/NUMBER 选项可带 choices；其余类型带 choices 会让
+        # sync_commands 因非法 payload 失败，故整体忽略并告警。
+        if opt_type not in ("string", "integer", "number"):
+            logger.warning(
+                f"[Discord] Option '{opt_name}': choices are only valid for "
+                f"string/integer/number options, not '{opt_type}'; ignoring choices."
+            )
+            return []
+        # value 转型函数：按 option 类型对齐，非数值类型一律 str。
+        casters = {"integer": int, "number": float}
+        cast = casters.get(opt_type, str)
+        out: list[discord.OptionChoice] = []
+        for item in raw_choices:
+            if not isinstance(item, dict):
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': skipping non-object choice {item!r}."
+                )
+                continue
+            cname = str(item.get("name") or "").strip()
+            if not cname:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': skipping choice without a name."
+                )
+                continue
+            raw_value = item.get("value")
+            # value 是路由 token，缺失时无法转型/路由（避免 str(None)→"None"），直接跳过。
+            if raw_value is None:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' has no value; skipping."
+                )
+                continue
+            try:
+                cvalue = cast(raw_value)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' value "
+                    f"{raw_value!r} not coercible to {opt_type}; skipping."
+                )
+                continue
+            # Discord 限制 string choice value ≤ 100 字符；截断会改变路由 token，故跳过。
+            if isinstance(cvalue, str) and len(cvalue) > 100:
+                logger.warning(
+                    f"[Discord] Option '{opt_name}': choice '{cname}' value exceeds "
+                    "100 chars (Discord limit); skipping."
+                )
+                continue
+            choice_kwargs: dict[str, Any] = {"name": cname[:100], "value": cvalue}
+            cloc = self._filter_localizations(item.get("name_localizations"))
+            if cloc:
+                choice_kwargs["name_localizations"] = cloc
+            out.append(discord.OptionChoice(**choice_kwargs))
+        if len(out) > 25:
+            logger.warning(
+                f"[Discord] Option '{opt_name}': {len(out)} choices exceed Discord's "
+                "limit of 25; truncating to the first 25."
+            )
+            out = out[:25]
+        return out
+
+    @staticmethod
+    def _filter_localizations(raw: Any) -> dict[str, str]:
+        """过滤本地化字典到合法 Discord locale 码，非法键告警并丢弃。"""
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, str] = {}
+        for key, value in raw.items():
+            if key not in _DISCORD_VALID_LOCALE_SET:
+                logger.warning(
+                    f"[Discord] Ignoring unknown Discord locale code in localizations: {key!r}"
+                )
+                continue
+            if isinstance(value, str) and value.strip():
+                out[key] = value[:100]
+        return out
+
+    def _create_dynamic_callback(
+        self, command_name: str, option_count: int, ephemeral: bool = False
+    ):
+        """为每个指令动态创建一个异步回调函数。
+
+        command_name 为底层 AstrBot 指令名（注册表键），用于构造 message_str
+        之后交给CommandFilter，即使 Discord 上的 slash 名被自定义，也能路由回原指令。
+
+        ephemeral 为 per-trigger 私密响应位（注册表静态声明）：True 时本次触发的 defer 与
+        全部 followup 都仅触发者可见。Discord 在 defer 时刻锁定该状态，故必须随注册一起静态传入。
+
+        Pycord 用 options kwarg 注册时，会把每个 Option 按位置匹配到回调的具名参数并以该名回传值
+        没有具名参数，多 Option 会触发 "Too many arguments passed to the options kwarg"。
+        因此给回调挂一个合成 __signature__：ctx + arg0..argN-1，让 Pycord 把 N 个 Option
+        分别绑定到 arg0..；运行时仍由 **kwargs 接收，再按 arg{i} 顺序取值。
+        """
+        param_names = [f"arg{i}" for i in range(option_count)]
 
         async def dynamic_callback(
-            ctx: discord.ApplicationContext, params: str | None = None
+            ctx: discord.ApplicationContext, **kwargs: Any
         ) -> None:
-            # 1. 嘗試立即响应，防止超时 (移到最前面)
+            # 1. 尝试立即响应，防止超时（移到最前面）
             followup_webhook = None
             try:
-                # 設定 2.5 秒超時，避免卡死整個 event loop
-                await asyncio.wait_for(ctx.defer(), timeout=2.5)
+                # 设定 2.5 秒超时，避免卡死整个 event loop。
+                # ephemeral 在此刻锁定：True → 本次 defer + 全部 followup 仅触发者可见。
+                await asyncio.wait_for(ctx.defer(ephemeral=ephemeral), timeout=2.5)
                 followup_webhook = ctx.followup
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"[Discord] Defer command '{cmd_name}' timeout. Network might be too slow."
+                    f"[Discord] Defer command '{command_name}' timeout. Network might be too slow."
                 )
                 return
             except Exception as e:
-                logger.warning(f"[Discord] Failed to defer command '{cmd_name}': {e}")
+                logger.warning(
+                    f"[Discord] Failed to defer command '{command_name}': {e}"
+                )
                 return
 
-            # 将平台特定的前缀'/'剥离，以适配通用的CommandFilter
-            logger.debug(f"[Discord] Callback triggered: {cmd_name}")
-            logger.debug(f"[Discord] Callback context: {ctx}")
-            logger.debug(f"[Discord] Callback params: {params}")
-            message_str_for_filter = cmd_name
-            if params:
-                message_str_for_filter += f" {params}"
+            # 按声明顺序处理各参数值，通用映射进 AstrBot 消息模型（不绑定具体插件用法）：
+            #   - User/Member  → Comp.At（@ 提及，与 on_message 路径语义一致）
+            #   - Attachment   → Image（图片）/ File（其他）
+            #   - Role/Channel → Discord mention 文本（<@&id> / <#id>），信息保留进 message_str
+            #   - 标量(str/int/float/bool) → 文本进 message_str；CommandFilter 再按 handler 签名转型
+            # 非标量进消息链 component，标量进位置文本串。
+            parts = [command_name]
+            extra_components: list[Any] = []
+            for pname in param_names:
+                value = kwargs.get(pname)
+                if value is None:
+                    continue
+                if isinstance(value, (discord.User, discord.Member)):
+                    extra_components.append(
+                        At(qq=str(value.id), name=value.display_name)
+                    )
+                elif isinstance(value, discord.Attachment):
+                    if (value.content_type or "").startswith("image/"):
+                        extra_components.append(
+                            Image(file=value.url, filename=value.filename)
+                        )
+                    else:
+                        extra_components.append(
+                            File(name=value.filename, url=value.url)
+                        )
+                elif isinstance(value, discord.Role):
+                    parts.append(f"<@&{value.id}>")
+                elif isinstance(value, (GuildChannel, discord.Thread, PrivateChannel)):
+                    parts.append(f"<#{value.id}>")
+                elif isinstance(value, discord.Object):
+                    parts.append(str(value.id))
+                else:
+                    # 标量：保留 0 / False，仅跳过空字符串
+                    text = str(value)
+                    if text != "":
+                        parts.append(text)
+            message_str_for_filter = " ".join(parts)
 
             logger.debug(
-                f"[Discord] Slash command '{cmd_name}' triggered. "
-                f"Raw params: '{params}'. "
-                f"Built command string: '{message_str_for_filter}'",
+                f"[Discord] Slash command '{command_name}' triggered. "
+                f"Options: {kwargs}. Built command string: '{message_str_for_filter}'"
+                f"{f', +{len(extra_components)} component(s)' if extra_components else ''}",
             )
 
             # 2. 构建 AstrBotMessage
@@ -526,14 +1192,31 @@ class DiscordPlatformAdapter(Platform):
                 user_id=str(ctx.author.id),
                 nickname=ctx.author.display_name,
             )
-            abm.message = [Plain(text=message_str_for_filter)]
+            abm.message = [Plain(text=message_str_for_filter), *extra_components]
             abm.raw_message = ctx.interaction
             abm.self_id = cast(str, self.bot_self_id)
             abm.session_id = str(ctx.channel_id)
             abm.message_id = str(ctx.interaction.id)
 
-            # 3. 将消息和 webhook 分别交给 handle_msg 处理
-            await self.handle_msg(abm, followup_webhook)
+            # 3. 将消息、webhook、用户 locale 交给 handle_msg 处理。
+            # slash interaction 自带 ctx.locale，写入事件 extras；on_message 路径无此信息。
+            user_locale = str(ctx.locale) if ctx.locale else None
+            await self.handle_msg(
+                abm, followup_webhook, user_locale=user_locale, ephemeral=ephemeral
+            )
+
+        # 合成签名：ctx + arg0..argN-1，供 Pycord 把 Option 绑定到具名参数。
+        # 实际仍由上面的 **kwargs 接收，运行时按 arg{i} 顺序取值。
+        sig_params = [inspect.Parameter("ctx", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        for pname in param_names:
+            sig_params.append(
+                inspect.Parameter(
+                    pname,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    default=None,
+                )
+            )
+        dynamic_callback.__signature__ = inspect.Signature(sig_params)  # type: ignore[attr-defined]
 
         return dynamic_callback
 

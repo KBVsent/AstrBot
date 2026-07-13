@@ -485,11 +485,15 @@ class AstrMessageEvent(abc.ABC):
 
     """平台适配器"""
 
-    async def send(self, message: MessageChain) -> None:
+    async def send(self, message: MessageChain) -> str | None:
         """发送消息到消息平台。
 
         Args:
             message (MessageChain): 消息链，具体使用方式请参考文档。
+
+        Returns:
+            str | None: 支持的平台返回所发送消息的平台消息 id（可用于后续编辑等操作），
+            其余平台返回 None。基类默认返回 None。
 
         """
         # Leverage BLAKE2 hash function to generate a non-reversible hash of the sender ID for privacy.
