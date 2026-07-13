@@ -15,7 +15,7 @@ import botpy.types.message
 from botpy import Client
 from botpy.http import Route
 from botpy.types import message
-from botpy.types.message import MarkdownPayload, Media
+from botpy.types.message import MarkdownPayload, Media, Reference
 from tenacity import (
     before_sleep_log,
     retry,
@@ -26,7 +26,7 @@ from tenacity import (
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
-from astrbot.api.message_components import File, Image, Plain, Record, Video
+from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.platform import AstrBotMessage, PlatformMetadata
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
@@ -231,6 +231,21 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         return str(ret_id) if ret_id is not None else None
 
     @staticmethod
+    def _resolve_reference_id(source, reply_id: str) -> str | None:
+        """把消息链里 Reply.id 解析成 QQ 引用回复真正需要的 message_id。
+
+        - 群/C2C：QQ 只认 REFIDX（message_scene.ext.msg_idx），不认 ROBOT1.0_xxx
+          形式的 message_id。若调用方传的已是 REFIDX（前缀 ``REFIDX_``）则直接用；
+          否则视作「引用当前触发消息」，取该消息解析出的 REFIDX。
+        - 频道（Message/DirectMessage）：直接使用真实 message_id。
+        """
+        if isinstance(source, (botpy.message.GroupMessage, botpy.message.C2CMessage)):
+            if reply_id.startswith("REFIDX_"):
+                return reply_id
+            return getattr(source, "message_reference_id", None)
+        return reply_id
+
+    @staticmethod
     def _has_keyboard(message: MessageChain) -> bool:
         return any(isinstance(seg, (QQCKeyboard, QQCButton)) for seg in message.chain)
 
@@ -344,6 +359,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             file_source,
             file_name,
             keyboard_payload,
+            reference_message_id,
         ) = await QQOfficialMessageEvent._parse_to_qqofficial(
             message_to_send,
             convert_image_to_markdown=convert_img,
@@ -411,6 +427,36 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             botpy.message.Message | botpy.message.DirectMessage,
         ):
             payload["msg_seq"] = random.randint(1, 10000)
+
+        # 引用回复：QQ 仅允许纯文本(msg_type=0) 与图片富媒体(msg_type=7) 携带
+        # message_reference；markdown(msg_type=2) 不允许，语音/视频/文件/keyboard 也不允许。
+        if reference_message_id:
+            # 群/C2C 带图片会被改写为 msg_type=7（markdown 被 pop），此时可引用；
+            # 其余 use_md 非 False 的情况最终发送 markdown，不能引用。
+            image_becomes_media = bool(image_base64) and isinstance(
+                source, (botpy.message.GroupMessage, botpy.message.C2CMessage)
+            )
+            will_be_markdown = use_md is not False and not image_becomes_media
+            has_ref_blocking = bool(
+                record_file_path
+                or video_file_source
+                or file_source
+                or keyboard_payload
+                or will_be_markdown
+            )
+            if has_ref_blocking:
+                logger.debug(
+                    "[QQOfficial] 消息为 markdown 或含语音/视频/文件/按钮，忽略引用回复。"
+                )
+            else:
+                ref_id = self._resolve_reference_id(source, reference_message_id)
+                if ref_id:
+                    payload["message_reference"] = Reference(
+                        message_id=ref_id,
+                        ignore_get_message_error=True,
+                    )
+                else:
+                    logger.debug("[QQOfficial] 无法解析引用 REFIDX，跳过引用回复。")
 
         ret = None
         # 若 keyboard 和非 markdown-内联媒体同时存在，媒体路径会把 msg_type 改成 7
@@ -936,7 +982,8 @@ class QQOfficialMessageEvent(AstrMessageEvent):
 
         Returns:
             (plain_text, image_base64, image_file_path, record_file_path,
-             video_file_source, file_source, file_name, keyboard_payload)
+             video_file_source, file_source, file_name, keyboard_payload,
+             reference_message_id)
         """
         plain_text = ""
         image_base64 = None  # only one img supported for msg_type=7 path
@@ -946,10 +993,14 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         file_source = None
         file_name = None
         keyboard_payload: dict | None = None
+        reference_message_id: str | None = None
         pending_buttons: list[QQCButton] = []
         for i in message.chain:
             if isinstance(i, Plain):
                 plain_text += i.text
+            elif isinstance(i, Reply):
+                # 引用回复：取被引用消息 ID，实际填充在 _post_send_one
+                reference_message_id = str(i.id) if i.id is not None else None
             elif isinstance(i, QQCKeyboard):
                 keyboard_payload = i.to_dict()
             elif isinstance(i, QQCButton):
@@ -1027,4 +1078,5 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             file_source,
             file_name,
             keyboard_payload,
+            reference_message_id,
         )

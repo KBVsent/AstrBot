@@ -60,10 +60,14 @@ class AstrBotMessage:
     message_str: str  # 最直观的纯文本消息字符串
     raw_message: object
     timestamp: int  # 消息时间戳
+    message_reference_id: (
+        str | None
+    )  # 平台侧引用回复所需的消息标识（如 QQ 官方 REFIDX）
 
     def __init__(self) -> None:
         self.timestamp = int(time.time())
         self.group = None
+        self.message_reference_id = None
 
     def __str__(self) -> str:
         return str(self.__dict__)

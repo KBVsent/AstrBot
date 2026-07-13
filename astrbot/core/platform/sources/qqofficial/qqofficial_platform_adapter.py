@@ -38,6 +38,22 @@ for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
 
 
+def _parse_scene_refidx(data: dict[str, Any]) -> str | None:
+    """从 message_scene.ext 中解析 REFIDX（msg_idx）"""
+    scene = data.get("message_scene")
+    if not isinstance(scene, dict):
+        return None
+    ext = scene.get("ext")
+    if isinstance(ext, dict):
+        val = ext.get("msg_idx")
+        return str(val) if val else None
+    if isinstance(ext, list):
+        for item in ext:
+            if isinstance(item, str) and item.startswith("msg_idx="):
+                return item[len("msg_idx=") :] or None
+    return None
+
+
 def _set_raw_message_fields(message: Any, data: dict[str, Any]) -> None:
     """Preserve QQ message fields that qq-botpy does not expose.
 
@@ -54,10 +70,11 @@ def _set_raw_message_fields(message: Any, data: dict[str, Any]) -> None:
     message.message_type = data.get("message_type")
     msg_elements = data.get("msg_elements")
     message.msg_elements = msg_elements if isinstance(msg_elements, list) else []
+    message.message_reference_id = _parse_scene_refidx(data)
 
 
 class PatchedMessage(botpy.message.Message):
-    __slots__ = ("raw_data", "message_type", "msg_elements")
+    __slots__ = ("raw_data", "message_type", "msg_elements", "message_reference_id")
 
     def __init__(
         self,
@@ -70,7 +87,7 @@ class PatchedMessage(botpy.message.Message):
 
 
 class PatchedDirectMessage(botpy.message.DirectMessage):
-    __slots__ = ("raw_data", "message_type", "msg_elements")
+    __slots__ = ("raw_data", "message_type", "msg_elements", "message_reference_id")
 
     def __init__(
         self,
@@ -83,7 +100,7 @@ class PatchedDirectMessage(botpy.message.DirectMessage):
 
 
 class PatchedC2CMessage(botpy.message.C2CMessage):
-    __slots__ = ("raw_data", "message_type", "msg_elements")
+    __slots__ = ("raw_data", "message_type", "msg_elements", "message_reference_id")
 
     def __init__(
         self,
@@ -96,7 +113,7 @@ class PatchedC2CMessage(botpy.message.C2CMessage):
 
 
 class PatchedGroupMessage(botpy.message.GroupMessage):
-    __slots__ = ("raw_data", "message_type", "msg_elements")
+    __slots__ = ("raw_data", "message_type", "msg_elements", "message_reference_id")
 
     def __init__(
         self,
@@ -404,6 +421,7 @@ class QQOfficialPlatformAdapter(Platform):
             file_source,
             file_name,
             keyboard_payload,
+            reference_message_id,
         ) = await QQOfficialMessageEvent._parse_to_qqofficial(
             message_chain,
             convert_image_to_markdown=convert_img,
@@ -461,6 +479,26 @@ class QQOfficialPlatformAdapter(Platform):
         # 主动发送（无缓存 msg_id 的群消息）时不携带 msg_id
         if msg_id and not allow_group_proactive_send:
             payload["msg_id"] = msg_id
+        # 引用回复：主动推送无触发消息，调用方需自行提供正确的引用 ID
+        # （群/C2C 为 REFIDX，频道为 message_id）。文本 / 图片+文字可引用；
+        # markdown(msg_type=2) 及语音/视频/文件/keyboard 的 payload 不接受引用。
+        # 主动路径下 markdown 仅在无媒体时出现，因此按 payload 是否含 markdown 判断即可。
+        has_ref_blocking_media = bool(
+            record_file_path or video_file_source or file_source
+        )
+        is_markdown_payload = "markdown" in payload
+        if (
+            reference_message_id
+            and not has_ref_blocking_media
+            and not keyboard_payload
+            and not is_markdown_payload
+        ):
+            from botpy.types.message import Reference as _Ref  # noqa: PLC0415
+
+            payload["message_reference"] = _Ref(
+                message_id=reference_message_id,
+                ignore_get_message_error=True,
+            )
         # 媒体 + keyboard 时，稍后需要补发一条 markdown+keyboard
         need_keyboard_followup = has_media and keyboard_payload is not None
         ret: Any = None
@@ -822,6 +860,10 @@ class QQOfficialPlatformAdapter(Platform):
         abm.timestamp = int(time.time())
         abm.raw_message = message
         abm.message_id = message.id
+        # REFIDX（message_scene.ext.msg_idx），用于群/C2C 的引用回复。
+        # 插件可用 Reply(id=event.message_obj.message_id) 引用当前消息，适配器会
+        # 在发送时自动翻译为 REFIDX；也可直接读取本字段拿到原始 REFIDX。
+        abm.message_reference_id = getattr(message, "message_reference_id", None)
         # abm.tag = "qq_official"
         msg: list[BaseMessageComponent] = []
         message_reference = getattr(message, "message_reference", None)
