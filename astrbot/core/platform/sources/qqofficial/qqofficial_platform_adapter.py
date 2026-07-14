@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -133,6 +134,7 @@ class PatchedGroupMessage(botpy.message.GroupMessage):
             self.member_openid = data.get("member_openid", None)
             self.user_openid = data.get("user_openid", None)
             self.is_you = data.get("is_you", None)
+            self.scope = data.get("scope", None)
 
         def __repr__(self) -> str:
             return str(self.__dict__)
@@ -924,32 +926,81 @@ class QQOfficialPlatformAdapter(Platform):
                     getattr(message.author, "username", "") or "",
                 )
                 abm.group_id = message.group_openid
+                all_mentions = list(getattr(message, "mentions", None) or [])
                 bot_mentions = [
                     mention
-                    for mention in (getattr(message, "mentions", None) or [])
+                    for mention in all_mentions
                     if getattr(mention, "is_you", False) is True
                     and getattr(mention, "id", None) is not None
                 ]
                 bot_mention_ids = [str(mention.id) for mention in bot_mentions]
                 group_mentioned = bool(bot_mention_ids) or force_group_mention
-                plain_content_raw = message.content or ""
-                for mention_id in bot_mention_ids:
-                    plain_content_raw = plain_content_raw.replace(
-                        f"<@{mention_id}>",
-                        "",
-                    ).replace(
-                        f"<@!{mention_id}>",
-                        "",
+                abm.self_id = bot_mention_ids[0] if bot_mention_ids else "qq_official"
+                # 构造 mention_id -> At 组件映射；@全体成员单独收集（正文中无 <@id> 标记）。
+                mention_at_map: dict[str, BaseMessageComponent] = {}
+                all_member_ats: list[BaseMessageComponent] = []
+                for mention in all_mentions:
+                    if getattr(mention, "scope", None) == "all":
+                        all_member_ats.append(At(qq="all", name="全体成员"))
+                        continue
+                    mid = getattr(mention, "id", None) or getattr(
+                        mention, "member_openid", None
                     )
+                    if not mid:
+                        continue
+                    mid = str(mid)
+                    if getattr(mention, "is_you", False) is True:
+                        mention_at_map[mid] = At(
+                            qq=abm.self_id,
+                            name=getattr(mention, "username", "") or "",
+                        )
+                    else:
+                        mention_at_map[mid] = At(
+                            qq=str(getattr(mention, "member_openid", None) or mid),
+                            name=getattr(mention, "username", "") or "",
+                        )
+                # 按 <@id> 在正文中的真实位置交错构造 At / Plain 段，保留 @ 的原始顺序，
+                content = message.content or ""
+                ordered: list[BaseMessageComponent] = []
+                bot_at_inserted = False
+                last_idx = 0
+                for m in re.finditer(r"<@!?([^>]+)>", content):
+                    text_seg = content[last_idx : m.start()]
+                    last_idx = m.end()
+                    if text_seg:
+                        ordered.append(
+                            Plain(
+                                QQOfficialPlatformAdapter._parse_face_message(text_seg)
+                            )
+                        )
+                    at_comp = mention_at_map.get(m.group(1))
+                    if at_comp is not None:
+                        ordered.append(at_comp)
+                        if str(getattr(at_comp, "qq", "")) == str(abm.self_id):
+                            bot_at_inserted = True
+                tail_seg = content[last_idx:]
+                if tail_seg:
+                    ordered.append(
+                        Plain(QQOfficialPlatformAdapter._parse_face_message(tail_seg))
+                    )
+                # message_str 保留全部正文（剥离所有 @ 标记后）
+                plain_content_raw = content
+                for mention_id in mention_at_map:
+                    plain_content_raw = plain_content_raw.replace(
+                        f"<@{mention_id}>", ""
+                    ).replace(f"<@!{mention_id}>", "")
                 abm.message_str = QQOfficialPlatformAdapter._parse_face_message(
                     plain_content_raw.strip()
                 )
-                abm.self_id = bot_mention_ids[0] if bot_mention_ids else "qq_official"
-                if group_mentioned:
+                # 被动 @（force_group_mention）时正文可能没有 <@bot> 标记，补一个首段 At(bot)
+                if group_mentioned and not bot_at_inserted:
                     mention_name = (
                         getattr(bot_mentions[0], "username", "") if bot_mentions else ""
                     )
-                    msg.append(At(qq=abm.self_id, name=mention_name))
+                    ordered.insert(0, At(qq=abm.self_id, name=mention_name))
+                # @全体成员无位置信息，统一放在最前（唤醒守卫允许 qq == "all"）
+                msg.extend(all_member_ats)
+                msg.extend(ordered)
             else:
                 abm.sender = MessageMember(
                     message.author.user_openid,
@@ -960,7 +1011,7 @@ class QQOfficialPlatformAdapter(Platform):
                 )
                 abm.self_id = "unknown_selfid"
                 msg.append(At(qq="qq_official"))
-            msg.append(Plain(abm.message_str))
+                msg.append(Plain(abm.message_str))
             await QQOfficialPlatformAdapter._append_attachments(
                 msg, message.attachments
             )
