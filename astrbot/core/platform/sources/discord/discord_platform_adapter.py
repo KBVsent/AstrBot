@@ -579,8 +579,25 @@ class DiscordPlatformAdapter(Platform):
             mode == "startup_if_changed"
             and fingerprint == self._load_synced_fingerprint()
         ):
-            # 指纹命中 ⇒ 命令集/scope 未变 ⇒ 复用已存 id（别名映射本轮 build 已重建）。
-            self._apply_command_ids(self._load_command_ids())
+            # 指纹命中 ⇒ 命令集/scope 未变 ⇒ 无需重新同步（写）。
+            stored_ids = self._load_command_ids()
+            live_ids = await self._fetch_live_command_ids()
+            if live_ids is not None:
+                # 只保留本轮 build 的指令，忽略其它作用域/历史遗留的孤儿命令。
+                effective_ids = {
+                    name: cmd_id
+                    for name, cmd_id in live_ids.items()
+                    if name in self._slash_to_cmd_name
+                }
+                if effective_ids != stored_ids:
+                    # 自愈：把权威 id 写回本地缓存，纠正可能被覆盖的旧值。
+                    self._store_command_ids(effective_ids)
+                    logger.info(
+                        "[Discord] Reconciled stored command ids with live Discord state."
+                    )
+            else:
+                effective_ids = stored_ids
+            self._apply_command_ids(effective_ids)
             logger.info(
                 f"[Discord] Slash commands unchanged since last sync; skipping sync "
                 f"({len(built)} commands remain routable)."
@@ -841,6 +858,38 @@ class DiscordPlatformAdapter(Platform):
             if cmd_name:
                 mention_map.setdefault(cmd_name, mention)
         self.client.command_mention_map = mention_map
+
+    async def _fetch_live_command_ids(self) -> dict[str, int] | None:
+        """拉取当前作用域 Discord 实际已注册指令的 slash_name→id"""
+        client = self.client
+        app_id = client.application_id or (client.user.id if client.user else None)
+        if not app_id:
+            return None
+        try:
+            if self.guild_id:
+                coro = client.http.get_guild_commands(app_id, int(self.guild_id))
+            else:
+                coro = client.http.get_global_commands(app_id)
+            raw = await asyncio.wait_for(coro, timeout=self._SYNC_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[Discord] Fetching live command ids timed out after "
+                f"{self._SYNC_TIMEOUT}s; falling back to stored ids."
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                f"[Discord] Failed to fetch live command ids: {e}; "
+                "falling back to stored ids."
+            )
+            return None
+        ids: dict[str, int] = {}
+        for cmd in raw or []:
+            name = cmd.get("name")
+            cmd_id = cmd.get("id")
+            if name and cmd_id:
+                ids[str(name)] = int(cmd_id)
+        return ids
 
     @staticmethod
     def _is_daily_command_quota_error(error: discord.HTTPException) -> bool:
