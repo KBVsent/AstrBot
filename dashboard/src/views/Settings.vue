@@ -576,6 +576,7 @@ const systemConfigGroups = computed(() => {
         ]),
         createGroup('logs', [
             'log_level',
+            'inbound_message_log',
             'log_file_enable',
             'log_file_path',
             'log_file_max_mb',

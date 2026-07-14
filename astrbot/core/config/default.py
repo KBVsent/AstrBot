@@ -291,6 +291,7 @@ DEFAULT_CONFIG = {
     },
     "wake_prefix": ["/"],
     "log_level": "INFO",
+    "inbound_message_log": "wake_only",
     "log_file_enable": False,
     "log_file_path": "logs/astrbot.log",
     "log_file_max_mb": 20,
@@ -3062,6 +3063,10 @@ CONFIG_METADATA_2 = {
                 "type": "string",
                 "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
             },
+            "inbound_message_log": {
+                "type": "string",
+                "options": ["wake_only", "all"],
+            },
             "dashboard.ssl.enable": {"type": "bool"},
             "dashboard.trust_proxy_headers": {"type": "bool"},
             "dashboard.auth_rate_limit.enable": {"type": "bool"},
@@ -4320,6 +4325,13 @@ CONFIG_METADATA_3_SYSTEM = {
                         "type": "string",
                         "hint": "控制台输出日志的级别。",
                         "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                    },
+                    "inbound_message_log": {
+                        "description": "入站消息日志",
+                        "type": "string",
+                        "hint": "仅触发时会将 @、回复、唤醒前缀和匹配指令的消息记录为 INFO，其他消息降为 DEBUG；全部消息会维持所有入站消息为 INFO。",
+                        "options": ["wake_only", "all"],
+                        "labels": ["仅触发时", "全部消息"],
                     },
                     "dashboard.ssl.enable": {
                         "description": "启用 WebUI HTTPS",

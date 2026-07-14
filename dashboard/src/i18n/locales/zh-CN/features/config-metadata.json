@@ -1071,6 +1071,14 @@
         "description": "控制台日志级别",
         "hint": "控制台输出日志的级别。"
       },
+      "inbound_message_log": {
+        "description": "入站消息日志",
+        "hint": "仅触发时会将 @、回复、唤醒前缀和匹配指令的消息记录为 INFO，其他消息降为 DEBUG；全部消息会维持所有入站消息为 INFO。",
+        "labels": [
+          "仅触发时",
+          "全部消息"
+        ]
+      },
       "log_file_enable": {
         "description": "启用文件日志",
         "hint": "在控制台输出的同时，将日志写入文件。"

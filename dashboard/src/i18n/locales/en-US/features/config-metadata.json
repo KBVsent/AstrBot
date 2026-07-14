@@ -1069,6 +1069,14 @@
         "description": "Console Log Level",
         "hint": "Log level for console output."
       },
+      "inbound_message_log": {
+        "description": "Inbound Message Logging",
+        "hint": "Wake-only logs @mentions, replies, wake prefixes, and matched commands at INFO, and demotes other inbound messages to DEBUG. All keeps every inbound message at INFO.",
+        "labels": [
+          "Wake only",
+          "All messages"
+        ]
+      },
       "log_file_enable": {
         "description": "Enable File Logging",
         "hint": "Write logs to a file in addition to the console."
