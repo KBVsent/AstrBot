@@ -106,6 +106,8 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.bot = bot
         self.send_buffer = None
+        # bot 自己最后一条成功发出的消息 id，供 recall() 默认撤回使用
+        self.last_sent_message_id: str | None = None
         self._interaction_acked = False
         self._interaction_ack_done = asyncio.Event()
         self._interaction_ack_code: int = 0
@@ -138,7 +140,75 @@ class QQOfficialMessageEvent(AstrMessageEvent):
 
     async def send(self, message: MessageChain) -> None:
         self.send_buffer = message
-        await self._post_send()
+        ret = await self._post_send()
+        sent_id = self._extract_response_message_id(ret)
+        if sent_id is not None:
+            self.last_sent_message_id = sent_id
+
+    async def recall(self, message_id: str | None = None, hidetip: bool = False) -> bool:
+        """撤回消息。
+
+        Args:
+            message_id: 要撤回的消息 id。为空时撤回 bot 自己最后发出的那条消息
+            hidetip: 频道场景是否隐藏"消息已撤回"小灰条，群/C2C 场景忽略
+
+        Returns:
+            是否撤回成功
+        """
+        source = self.message_obj.raw_message
+        mid = message_id or self.last_sent_message_id
+        if not mid:
+            logger.warning("[QQOfficial] recall 无可撤回的 message_id")
+            return False
+
+        http = self.bot.api._http
+        try:
+            match source:
+                case botpy.message.GroupMessage():
+                    if not source.group_openid:
+                        return False
+                    await http.request(
+                        Route(
+                            "DELETE",
+                            "/v2/groups/{group_openid}/messages/{message_id}",
+                            group_openid=source.group_openid,
+                            message_id=mid,
+                        )
+                    )
+                case botpy.message.C2CMessage():
+                    await http.request(
+                        Route(
+                            "DELETE",
+                            "/v2/users/{user_openid}/messages/{message_id}",
+                            user_openid=source.author.user_openid,
+                            message_id=mid,
+                        )
+                    )
+                case botpy.message.Message():
+                    await self.bot.api.recall_message(
+                        channel_id=source.channel_id,
+                        message_id=mid,
+                        hidetip=hidetip,
+                    )
+                case botpy.message.DirectMessage():
+                    await http.request(
+                        Route(
+                            "DELETE",
+                            "/dms/{guild_id}/messages/{message_id}",
+                            guild_id=source.guild_id,
+                            message_id=mid,
+                        ),
+                        params={"hidetip": str(hidetip).lower()},
+                    )
+                case _:
+                    logger.debug(
+                        "[QQOfficial] recall 不支持的消息源类型: %s", type(source)
+                    )
+                    return False
+            return True
+        except Exception as e:
+            logger.debug(f"[QQOfficial] 撤回失败 message_id={mid}: {e}")
+            return False
 
     async def send_streaming(self, generator, use_fallback: bool = False):
         """流式输出仅支持消息列表私聊（C2C），其他消息源退化为普通发送"""
