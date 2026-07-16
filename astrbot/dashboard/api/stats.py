@@ -50,30 +50,44 @@ def _parse_int(value: object, default: int, name: str) -> int:
 
 @router.get("/stats")
 async def get_stats(
-    offset_sec: int = Query(default=86400),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     _auth: AuthContext = Depends(require_system_scope),
     service: StatService = Depends(get_service),
 ):
-    return await _run(service.get_stat(offset_sec))
+    return await _run(service.get_stat(date, platform_id))
 
 
 @router.get("/stats/provider-tokens")
 async def get_provider_token_stats(
-    days: int = Query(default=1),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     _auth: AuthContext = Depends(require_system_scope),
     service: StatService = Depends(get_service),
 ):
-    return await _run(service.get_provider_token_stats(days))
+    return await _run(service.get_provider_token_stats(date, platform_id))
 
 
 @router.get("/stats/top-commands")
 async def get_top_commands(
-    offset_sec: int = Query(default=86400),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     limit: int = Query(default=20),
     _auth: AuthContext = Depends(require_system_scope),
     service: StatService = Depends(get_service),
 ):
-    return await _run(service.get_top_commands(offset_sec, limit))
+    return await _run(service.get_top_commands(date, platform_id, limit))
+
+
+@router.get("/stats/active-sessions")
+async def get_active_session_stats(
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
+    limit: int = Query(default=20),
+    _auth: AuthContext = Depends(require_system_scope),
+    service: StatService = Depends(get_service),
+):
+    return await _run(service.get_active_session_stats(date, platform_id, limit))
 
 
 @router.get("/stats/version")
@@ -165,32 +179,53 @@ async def restart_system(
 
 @legacy_router.get("/get")
 async def get_dashboard_stats(
-    offset_sec: int | None = Query(default=86400),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     _username: str = Depends(require_dashboard_user),
     service: StatService = Depends(get_service),
 ):
-    return await _run(service.get_stat(_parse_int(offset_sec, 86400, "offset_sec")))
+    return await _run(service.get_stat(date, platform_id))
 
 
 @legacy_router.get("/provider-tokens")
 async def get_dashboard_provider_token_stats(
-    days: int | None = Query(default=1),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     _username: str = Depends(require_dashboard_user),
     service: StatService = Depends(get_service),
 ):
-    return await _run(service.get_provider_token_stats(_parse_int(days, 1, "days")))
+    return await _run(service.get_provider_token_stats(date, platform_id))
 
 
 @legacy_router.get("/top-commands")
 async def get_dashboard_top_commands(
-    offset_sec: int | None = Query(default=86400),
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
     limit: int | None = Query(default=20),
     _username: str = Depends(require_dashboard_user),
     service: StatService = Depends(get_service),
 ):
     return await _run(
         service.get_top_commands(
-            _parse_int(offset_sec, 86400, "offset_sec"),
+            date,
+            platform_id,
+            _parse_int(limit, 20, "limit"),
+        )
+    )
+
+
+@legacy_router.get("/active-sessions")
+async def get_dashboard_active_session_stats(
+    date: str | None = Query(default=None),
+    platform_id: str | None = Query(default=None),
+    limit: int | None = Query(default=20),
+    _username: str = Depends(require_dashboard_user),
+    service: StatService = Depends(get_service),
+):
+    return await _run(
+        service.get_active_session_stats(
+            date,
+            platform_id,
             _parse_int(limit, 20, "limit"),
         )
     )

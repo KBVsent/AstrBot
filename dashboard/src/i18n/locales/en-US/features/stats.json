@@ -5,15 +5,13 @@
     "subtitle": "A unified view of platforms, messages, and model calls.",
     "notUpdated": "Not updated yet"
   },
-  "ranges": {
-    "oneDay": "1 Day",
-    "threeDays": "3 Days",
-    "oneWeek": "1 Week"
+  "filters": {
+    "date": "Date",
+    "platform": "Adapter",
+    "allPlatforms": "All adapters"
   },
   "rangeLabels": {
-    "oneDay": "Last 1 day",
-    "threeDays": "Last 3 days",
-    "oneWeek": "Last 1 week"
+    "today": "Today"
   },
   "overviewCards": {
     "platformCount": {
@@ -22,7 +20,23 @@
     },
     "messageCount": {
       "label": "Messages",
-      "note": "Total accumulated messages"
+      "note": "Messages on the selected date"
+    },
+    "distinctUsers": {
+      "label": "Unique Users",
+      "note": "Distinct users on the selected date"
+    },
+    "distinctUsersGroup": {
+      "label": "Group Unique Users",
+      "note": "Distinct users in group chats"
+    },
+    "distinctUsersPrivate": {
+      "label": "Private Unique Users",
+      "note": "Distinct users in private chats"
+    },
+    "distinctGroups": {
+      "label": "Unique Groups",
+      "note": "Distinct groups on the selected date"
     },
     "todayModelCalls": {
       "label": "Today's Model Calls",
@@ -39,7 +53,8 @@
     "uptime": {
       "label": "Uptime",
       "note": "Started at {startTime}"
-    }
+    },
+    "cycleHint": "Click card to switch scope"
   },
   "messageOverview": {
     "title": "Message Overview",
@@ -59,6 +74,22 @@
     "subtitle": "{range}, sorted by trigger count",
     "plugin": "Plugin",
     "times": "times",
+    "regex": "Regex",
+    "total": "{count} total"
+  },
+  "activeUsers": {
+    "title": "{range} Active Users",
+    "subtitle": "Ranked by messages handled by the bot",
+    "total": "{count} total",
+    "tabs": {
+      "all": "All",
+      "group": "Group",
+      "private": "Private"
+    }
+  },
+  "activeGroups": {
+    "title": "{range} Active Groups",
+    "subtitle": "Ranked by messages handled by the bot",
     "total": "{count} total"
   },
   "modelCalls": {
@@ -89,7 +120,9 @@
     "platformStats": "No platform message statistics available.",
     "modelCalls": "No model call data for {range}.",
     "sessionCalls": "No session call data for {range}.",
-    "commandStats": "No command trigger statistics available."
+    "commandStats": "No command trigger statistics available.",
+    "activeUsers": "No user activity data for the selected date.",
+    "activeGroups": "No group activity data for the selected date."
   },
   "chart": {
     "messages": "Messages",

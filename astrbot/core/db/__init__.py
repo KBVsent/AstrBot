@@ -114,24 +114,102 @@ class BaseDatabase(abc.ABC):
         self,
         command_name: str,
         plugin_name: str = "",
+        platform_id: str = "",
+        trigger_type: str = "command",
         count: int = 1,
         timestamp: datetime.datetime | None = None,
     ) -> None:
-        """Insert (or increment) a command trigger statistic record."""
+        """Insert (or increment) a command / regex trigger statistic record."""
+        ...
+
+    @abc.abstractmethod
+    async def insert_command_stats_batch(
+        self,
+        records: list[dict],
+    ) -> None:
+        """Upsert many pre-aggregated command-trigger records in a single transaction."""
         ...
 
     @abc.abstractmethod
     async def get_top_commands(
         self,
-        offset_sec: int = 86400,
+        start_time: datetime.datetime,
+        end_time: datetime.datetime,
+        platform_id: str | None = None,
         limit: int = 20,
-    ) -> list[tuple[str, str, int]]:
-        """Get the most frequently triggered commands within the offset.
+    ) -> list[tuple[str, str, str, int]]:
+        """Get the most frequently triggered commands within [start_time, end_time).
 
-        Each (plugin_name, command_name) pair is counted separately. Returns a
-        list of (command_name, plugin_name, total_count) ordered by total_count
-        descending.
+        Each (plugin_name, command_name, trigger_type) tuple is counted separately.
+        When ``platform_id`` is given, only triggers on that adapter are counted.
+        Returns a list of (command_name, plugin_name, trigger_type, total_count)
+        ordered by total_count descending.
         """
+        ...
+
+    @abc.abstractmethod
+    async def get_platform_stats_in_range(
+        self,
+        start_time: datetime.datetime,
+        end_time: datetime.datetime,
+        platform_id: str | None = None,
+    ) -> list[PlatformStat]:
+        """Get raw platform_stats rows within [start_time, end_time), asc by time."""
+        ...
+
+    @abc.abstractmethod
+    async def get_grouped_platform_stats_in_range(
+        self,
+        start_time: datetime.datetime,
+        end_time: datetime.datetime,
+        platform_id: str | None = None,
+    ) -> list[tuple[str, int]]:
+        """Get (platform_id, total_count) grouped within [start_time, end_time)."""
+        ...
+
+    @abc.abstractmethod
+    async def get_total_message_count_in_range(
+        self,
+        start_time: datetime.datetime,
+        end_time: datetime.datetime,
+        platform_id: str | None = None,
+    ) -> int:
+        """Get total message count within [start_time, end_time)."""
+        ...
+
+    @abc.abstractmethod
+    async def insert_session_activity_stat(
+        self,
+        *,
+        date: str,
+        platform_id: str,
+        platform_type: str,
+        message_type: str,
+        group_id: str,
+        group_name: str,
+        user_id: str,
+        user_name: str,
+        count: int = 1,
+    ) -> None:
+        """Upsert one session-activity record (per natural day) for a handled message."""
+        ...
+
+    @abc.abstractmethod
+    async def insert_session_activity_stats_batch(
+        self,
+        records: list[dict],
+    ) -> None:
+        """Upsert many pre-aggregated session-activity records in a single transaction."""
+        ...
+
+    @abc.abstractmethod
+    async def get_active_session_stats(
+        self,
+        date: str,
+        platform_id: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Aggregate distinct users / groups and activity rankings for a natural day."""
         ...
 
     @abc.abstractmethod

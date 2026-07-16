@@ -4,7 +4,7 @@ import typing as T
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import CursorResult, Row
+from sqlalchemy import CursorResult, Row, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import col, delete, desc, func, or_, select, text, update
 
@@ -25,6 +25,7 @@ from astrbot.core.db.po import (
     PlatformStat,
     Preference,
     ProviderStat,
+    SessionActivityStat,
     SessionProjectRelation,
     SQLModel,
     UmoAlias,
@@ -66,6 +67,7 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_persona_custom_error_message_column(conn)
             await self._ensure_platform_message_history_checkpoint_column(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
+            await self._ensure_command_stats_schema(conn)
             await conn.commit()
 
     async def _ensure_persona_folder_columns(self, conn) -> None:
@@ -147,6 +149,57 @@ class SQLiteDatabase(BaseDatabase):
                 text("ALTER TABLE chatui_projects ADD COLUMN workspace_path VARCHAR")
             )
 
+    async def _ensure_command_stats_schema(self, conn) -> None:
+        """把 command_stats 升级到含 platform_id + trigger_type 的最终结构。
+
+        历史上唯一约束由不可按名删除的自动索引支撑，无法直接 ALTER，故采用 SQLite
+        表重建。本方法兼容两种旧结构：
+          - 原始: (timestamp, plugin_name, command_name)
+          - 中间: 上者 + platform_id
+        统一重建为含 platform_id + trigger_type 的表，历史行 platform_id 缺失回填
+        空串、trigger_type 回填 'command'。全程在 initialize() 的同一事务内，失败
+        自动回滚。新库由 create_all 直接建成最终结构，检测到 trigger_type 已存在即
+        跳过。
+        """
+        result = await conn.execute(text("PRAGMA table_info(command_stats)"))
+        columns = {row[1] for row in result.fetchall()}
+        if "trigger_type" in columns:
+            return
+
+        platform_expr = "platform_id" if "platform_id" in columns else "''"
+        await conn.execute(
+            text(
+                "CREATE TABLE command_stats_new ("
+                "id INTEGER NOT NULL PRIMARY KEY, "
+                "timestamp DATETIME NOT NULL, "
+                "platform_id VARCHAR NOT NULL DEFAULT '', "
+                "trigger_type VARCHAR NOT NULL DEFAULT 'command', "
+                "plugin_name VARCHAR NOT NULL DEFAULT '', "
+                "command_name VARCHAR NOT NULL, "
+                "count INTEGER NOT NULL DEFAULT 0, "
+                "CONSTRAINT uix_command_stats UNIQUE "
+                "(timestamp, platform_id, trigger_type, plugin_name, command_name))"
+            )
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO command_stats_new "
+                "(id, timestamp, platform_id, trigger_type, plugin_name, command_name, count) "
+                f"SELECT id, timestamp, {platform_expr}, 'command', "
+                "plugin_name, command_name, count FROM command_stats"
+            )
+        )
+        await conn.execute(text("DROP TABLE command_stats"))
+        await conn.execute(
+            text("ALTER TABLE command_stats_new RENAME TO command_stats")
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_command_stats_platform_id "
+                "ON command_stats (platform_id)"
+            )
+        )
+
     # ====
     # Platform Statistics
     # ====
@@ -184,62 +237,101 @@ class SQLiteDatabase(BaseDatabase):
                     },
                 )
 
+    _COMMAND_STATS_UPSERT = """
+        INSERT INTO command_stats
+            (timestamp, platform_id, trigger_type, plugin_name, command_name, count)
+        VALUES
+            (:timestamp, :platform_id, :trigger_type, :plugin_name, :command_name, :count)
+        ON CONFLICT(timestamp, platform_id, trigger_type, plugin_name, command_name)
+        DO UPDATE SET count = command_stats.count + EXCLUDED.count
+    """
+
     async def insert_command_stats(
         self,
         command_name,
         plugin_name="",
+        platform_id="",
+        trigger_type="command",
         count=1,
         timestamp=None,
     ) -> None:
-        """Insert (or increment) a command trigger statistic record."""
+        """Insert (or increment) a command / regex trigger statistic record."""
+        if timestamp is None:
+            timestamp = datetime.now().replace(minute=0, second=0, microsecond=0)
+        await self.insert_command_stats_batch(
+            [
+                {
+                    "timestamp": timestamp,
+                    "platform_id": platform_id,
+                    "trigger_type": trigger_type,
+                    "plugin_name": plugin_name,
+                    "command_name": command_name,
+                    "count": count,
+                }
+            ]
+        )
+
+    async def insert_command_stats_batch(self, records: list[dict]) -> None:
+        """Upsert many pre-aggregated command-trigger records in a single transaction."""
+        if not records:
+            return
+        normalized_records = [
+            {
+                "timestamp": record["timestamp"],
+                "platform_id": record.get("platform_id") or "",
+                "trigger_type": record.get("trigger_type") or "command",
+                "plugin_name": record.get("plugin_name") or "",
+                "command_name": record["command_name"],
+                "count": record.get("count", 1),
+            }
+            for record in records
+        ]
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
-                if timestamp is None:
-                    timestamp = datetime.now().replace(
-                        minute=0,
-                        second=0,
-                        microsecond=0,
-                    )
                 await session.execute(
-                    text("""
-                    INSERT INTO command_stats (timestamp, plugin_name, command_name, count)
-                    VALUES (:timestamp, :plugin_name, :command_name, :count)
-                    ON CONFLICT(timestamp, plugin_name, command_name) DO UPDATE SET
-                        count = command_stats.count + EXCLUDED.count
-                    """),
-                    {
-                        "timestamp": timestamp,
-                        "plugin_name": plugin_name,
-                        "command_name": command_name,
-                        "count": count,
-                    },
+                    text(self._COMMAND_STATS_UPSERT),
+                    normalized_records,
                 )
 
     async def get_top_commands(
         self,
-        offset_sec=86400,
-        limit=20,
-    ) -> list[tuple[str, str, int]]:
-        """Get the most frequently triggered commands within the offset."""
+        start_time: datetime,
+        end_time: datetime,
+        platform_id: str | None = None,
+        limit: int = 20,
+    ) -> list[tuple[str, str, str, int]]:
+        """Get the most frequently triggered commands within [start_time, end_time).
+
+        Returns a list of (command_name, plugin_name, trigger_type, total_count).
+        """
         async with self.get_db() as session:
             session: AsyncSession
-            start_time = datetime.now() - timedelta(seconds=offset_sec)
             total = func.sum(CommandStat.count).label("total")
-            result = await session.execute(
-                select(
-                    CommandStat.command_name,
-                    CommandStat.plugin_name,
-                    total,
-                )
-                .where(CommandStat.timestamp >= start_time)
-                .group_by(CommandStat.plugin_name, CommandStat.command_name)
-                .order_by(desc(total))
-                .limit(limit),
+            query = select(
+                CommandStat.command_name,
+                CommandStat.plugin_name,
+                CommandStat.trigger_type,
+                total,
+            ).where(
+                CommandStat.timestamp >= start_time,
+                CommandStat.timestamp < end_time,
             )
+            if platform_id:
+                query = query.where(CommandStat.platform_id == platform_id)
+            query = (
+                query.group_by(
+                    CommandStat.plugin_name,
+                    CommandStat.command_name,
+                    CommandStat.trigger_type,
+                )
+                .order_by(desc(total))
+                .limit(limit)
+            )
+            result = await session.execute(query)
             return [
-                (command_name, plugin_name or "", int(count))
-                for command_name, plugin_name, count in result.all()
+                (command_name, plugin_name or "", trigger_type or "command", int(count))
+                for command_name, plugin_name, trigger_type, count in result.all()
             ]
 
     async def count_platform_stats(self) -> int:
@@ -270,6 +362,286 @@ class SQLiteDatabase(BaseDatabase):
                 {"start_time": start_time},
             )
             return list(result.scalars().all())
+
+    async def get_platform_stats_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        platform_id: str | None = None,
+    ) -> list[PlatformStat]:
+        """Get raw platform_stats rows within [start_time, end_time), asc by time.
+
+        Used to build the intra-day hourly message time series.
+        """
+        async with self.get_db() as session:
+            session: AsyncSession
+            query = select(PlatformStat).where(
+                PlatformStat.timestamp >= start_time,
+                PlatformStat.timestamp < end_time,
+            )
+            if platform_id:
+                query = query.where(PlatformStat.platform_id == platform_id)
+            query = query.order_by(col(PlatformStat.timestamp).asc())
+            result = await session.execute(query)
+            return list(result.scalars().all())
+
+    async def get_grouped_platform_stats_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        platform_id: str | None = None,
+    ) -> list[tuple[str, int]]:
+        """Get (platform_id, total_count) grouped within [start_time, end_time)."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            total = func.sum(PlatformStat.count).label("total")
+            query = select(PlatformStat.platform_id, total).where(
+                PlatformStat.timestamp >= start_time,
+                PlatformStat.timestamp < end_time,
+            )
+            if platform_id:
+                query = query.where(PlatformStat.platform_id == platform_id)
+            query = query.group_by(PlatformStat.platform_id).order_by(desc(total))
+            result = await session.execute(query)
+            return [(pid, int(count or 0)) for pid, count in result.all()]
+
+    async def get_total_message_count_in_range(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+        platform_id: str | None = None,
+    ) -> int:
+        """Get total message count within [start_time, end_time)."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            query = select(func.sum(PlatformStat.count)).where(
+                PlatformStat.timestamp >= start_time,
+                PlatformStat.timestamp < end_time,
+            )
+            if platform_id:
+                query = query.where(PlatformStat.platform_id == platform_id)
+            result = await session.execute(query)
+            total = result.scalar_one_or_none()
+            return int(total) if total is not None else 0
+
+    # ====
+    # Session Activity Statistics (distinct users / groups)
+    # ====
+
+    _SESSION_ACTIVITY_UPSERT = """
+        INSERT INTO session_activity_stats
+            (date, platform_id, platform_type, message_type,
+             group_id, group_name, user_id, user_name, count)
+        VALUES
+            (:date, :platform_id, :platform_type, :message_type,
+             :group_id, :group_name, :user_id, :user_name, :count)
+        ON CONFLICT(date, platform_id, group_id, user_id) DO UPDATE SET
+            count = session_activity_stats.count + EXCLUDED.count,
+            user_name = CASE WHEN EXCLUDED.user_name != ''
+                THEN EXCLUDED.user_name
+                ELSE session_activity_stats.user_name END,
+            group_name = CASE WHEN EXCLUDED.group_name != ''
+                THEN EXCLUDED.group_name
+                ELSE session_activity_stats.group_name END,
+            platform_type = CASE WHEN EXCLUDED.platform_type != ''
+                THEN EXCLUDED.platform_type
+                ELSE session_activity_stats.platform_type END
+    """
+
+    async def insert_session_activity_stat(
+        self,
+        *,
+        date: str,
+        platform_id: str,
+        platform_type: str,
+        message_type: str,
+        group_id: str,
+        group_name: str,
+        user_id: str,
+        user_name: str,
+        count: int = 1,
+    ) -> None:
+        """Upsert one session-activity record for a handled message (per natural day).
+
+        名称字段仅在本次拿到非空值时才覆盖，避免用空值把已有名字冲掉。
+        """
+        await self.insert_session_activity_stats_batch(
+            [
+                {
+                    "date": date,
+                    "platform_id": platform_id,
+                    "platform_type": platform_type,
+                    "message_type": message_type,
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "user_id": user_id,
+                    "user_name": user_name,
+                    "count": count,
+                }
+            ]
+        )
+
+    async def insert_session_activity_stats_batch(self, records: list[dict]) -> None:
+        """Upsert many pre-aggregated session-activity records in a single transaction.
+
+        由 SessionActivityRecorder 周期性批量落库调用：一次事务、一次写锁获取、
+        多条 UPSERT，避免每条消息一个独立写事务竞争 SQLite 单写者锁。
+        """
+        if not records:
+            return
+        # 归一化为统一键集，交给 SQLAlchemy executemany（传入参数列表一次执行）
+        normalized_records = [
+            {
+                "date": record["date"],
+                "platform_id": record["platform_id"],
+                "platform_type": record.get("platform_type") or "",
+                "message_type": record["message_type"],
+                "group_id": record.get("group_id") or "",
+                "group_name": record.get("group_name") or "",
+                "user_id": record["user_id"],
+                "user_name": record.get("user_name") or "",
+                "count": record.get("count", 1),
+            }
+            for record in records
+        ]
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(
+                    text(self._SESSION_ACTIVITY_UPSERT),
+                    normalized_records,
+                )
+
+    async def get_active_session_stats(
+        self,
+        date: str,
+        platform_id: str | None = None,
+        limit: int = 20,
+    ) -> dict:
+        """Aggregate distinct users / groups and activity rankings for a natural day.
+
+        Args:
+            date: Local natural day "YYYY-MM-DD".
+            platform_id: Optional adapter filter.
+            limit: Max rows for the user / group rankings.
+        """
+        from astrbot.core.platform.message_type import MessageType
+
+        group_type = MessageType.GROUP_MESSAGE.value
+        # 群聊 = GroupMessage；私聊 = 非群聊（包含 FriendMessage / OtherMessage）。
+        # 同一用户可能跨场景出现，因此群聊与私聊独立用户数之和可能大于总数。
+        is_group = SessionActivityStat.message_type == group_type
+        is_private = SessionActivityStat.message_type != group_type
+
+        async with self.get_db() as session:
+            session: AsyncSession
+            base_filter = [SessionActivityStat.date == date]
+            if platform_id:
+                base_filter.append(SessionActivityStat.platform_id == platform_id)
+
+            # 1) 单次条件聚合拿全部概览数字：总/群/私独立用户、独立群数、消息总量。
+            uid = SessionActivityStat.user_id
+            gid = SessionActivityStat.group_id
+            overview_stmt = select(
+                func.count(func.distinct(uid)),
+                func.count(func.distinct(case((is_group, uid)))),
+                func.count(func.distinct(case((is_private, uid)))),
+                func.count(func.distinct(case(((is_group) & (gid != ""), gid)))),
+                func.sum(SessionActivityStat.count),
+            ).where(*base_filter)
+            (
+                distinct_users,
+                distinct_users_group,
+                distinct_users_private,
+                distinct_groups,
+                total_messages,
+            ) = (await session.execute(overview_stmt)).one()
+
+            # 2~4) 三次排行榜查询：全部 / 群聊 / 私聊。
+            # 昵称回填由查询自身完成：MAX(user_name) 跨该用户当日所有场景取值，
+            # 私聊行天然借到群聊留下的昵称，无需额外的 name_rows 查询。
+            async def _top_users(scope_filter=None) -> list[dict]:
+                # 计数只统计该口径的消息；昵称跨口径取，实现回填。
+                if scope_filter is None:
+                    scoped_count = SessionActivityStat.count
+                else:
+                    scoped_count = case(
+                        (scope_filter, SessionActivityStat.count), else_=0
+                    )
+                user_total = func.sum(scoped_count).label("total")
+                stmt = (
+                    select(
+                        SessionActivityStat.platform_id,
+                        SessionActivityStat.user_id,
+                        func.max(SessionActivityStat.user_name),
+                        user_total,
+                    )
+                    .where(*base_filter)
+                    .group_by(
+                        SessionActivityStat.platform_id,
+                        SessionActivityStat.user_id,
+                    )
+                    .having(user_total > 0)
+                    .order_by(desc(user_total))
+                    .limit(limit)
+                )
+                return [
+                    {
+                        "platform_id": pid,
+                        "user_id": uid_,
+                        "user_name": uname or "",
+                        "count": int(cnt or 0),
+                    }
+                    for pid, uid_, uname, cnt in (await session.execute(stmt)).all()
+                ]
+
+            top_users = await _top_users()
+            top_users_group = await _top_users(is_group)
+            top_users_private = await _top_users(is_private)
+
+            group_total = func.sum(SessionActivityStat.count).label("total")
+            top_groups_stmt = (
+                select(
+                    SessionActivityStat.platform_id,
+                    SessionActivityStat.group_id,
+                    func.max(SessionActivityStat.group_name),
+                    group_total,
+                )
+                .where(
+                    *base_filter,
+                    is_group,
+                    SessionActivityStat.group_id != "",
+                )
+                .group_by(
+                    SessionActivityStat.platform_id,
+                    SessionActivityStat.group_id,
+                )
+                .order_by(desc(group_total))
+                .limit(limit)
+            )
+            top_groups = [
+                {
+                    "platform_id": pid,
+                    "group_id": gid,
+                    "group_name": gname or "",
+                    "count": int(cnt or 0),
+                }
+                for pid, gid, gname, cnt in (
+                    await session.execute(top_groups_stmt)
+                ).all()
+            ]
+
+            return {
+                "distinct_users": int(distinct_users or 0),
+                "distinct_users_group": int(distinct_users_group or 0),
+                "distinct_users_private": int(distinct_users_private or 0),
+                "distinct_groups": int(distinct_groups or 0),
+                "total_messages": int(total_messages or 0),
+                "top_users": top_users,
+                "top_users_group": top_users_group,
+                "top_users_private": top_users_private,
+                "top_groups": top_groups,
+            }
 
     async def insert_provider_stat(
         self,

@@ -390,6 +390,18 @@ class AstrBotCoreLifecycle:
         await self.kb_manager.terminate()
         self.dashboard_shutdown_event.set()
 
+        # 落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），避免优雅关闭丢失最后一个窗口
+        try:
+            from astrbot.core.utils.stat_recorders import (
+                command_stat_recorder,
+                session_activity_recorder,
+            )
+
+            await session_activity_recorder.flush()
+            await command_stat_recorder.flush()
+        except Exception as e:
+            logger.warning(f"刷写统计数据失败: {e}")
+
         # 再次遍历curr_tasks等待每个任务真正结束
         for task in self.curr_tasks:
             try:
@@ -411,6 +423,20 @@ class AstrBotCoreLifecycle:
         await self.platform_manager.terminate()
         await self.kb_manager.terminate()
         self.dashboard_shutdown_event.set()
+
+        # 重启会通过 os.execv 替换进程，先落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），
+        # 避免丢失最近最多约一个 flush 窗口的待写数据
+        try:
+            from astrbot.core.utils.stat_recorders import (
+                command_stat_recorder,
+                session_activity_recorder,
+            )
+
+            await session_activity_recorder.flush()
+            await command_stat_recorder.flush()
+        except Exception as e:
+            logger.warning(f"刷写统计数据失败: {e}")
+
         threading.Thread(
             target=self.astrbot_updator._reboot,
             name="restart",

@@ -3,7 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TypedDict
 
-from sqlmodel import JSON, Field, SQLModel, Text, UniqueConstraint
+from sqlalchemy.dialects.sqlite import DATETIME as SQLITE_DATETIME
+from sqlmodel import JSON, Column, Field, SQLModel, Text, UniqueConstraint
 
 
 class TimestampMixin(SQLModel):
@@ -23,7 +24,9 @@ class PlatformStat(SQLModel, table=True):
     __tablename__: str = "platform_stats"
 
     id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": True})
-    timestamp: datetime = Field(nullable=False)
+    timestamp: datetime = Field(
+        sa_column=Column(SQLITE_DATETIME(truncate_microseconds=True), nullable=False)
+    )
     platform_id: str = Field(nullable=False)
     platform_type: str = Field(nullable=False)  # such as "aiocqhttp", "slack", etc.
     count: int = Field(default=0, nullable=False)
@@ -50,17 +53,56 @@ class CommandStat(SQLModel, table=True):
     __tablename__: str = "command_stats"
 
     id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": True})
-    timestamp: datetime = Field(nullable=False)
+    timestamp: datetime = Field(
+        sa_column=Column(SQLITE_DATETIME(truncate_microseconds=True), nullable=False)
+    )
+    platform_id: str = Field(default="", nullable=False, index=True)  # 触发来源适配器
+    trigger_type: str = Field(default="command", nullable=False)  # "command" / "regex"
     plugin_name: str = Field(default="", nullable=False)  # owning plugin
-    command_name: str = Field(nullable=False)
+    command_name: str = Field(nullable=False)  # 指令名；正则处理器为 handler 名
     count: int = Field(default=0, nullable=False)
 
     __table_args__ = (
         UniqueConstraint(
             "timestamp",
+            "platform_id",
+            "trigger_type",
             "plugin_name",
             "command_name",
             name="uix_command_stats",
+        ),
+    )
+
+
+class SessionActivityStat(SQLModel, table=True):
+    """按自然日聚合的会话活跃统计（仅统计机器人实际处理的消息）。
+
+    用于计算独立用户数 / 独立群数，支持按日期、按平台筛选。重复消息只累加
+    ``count`` 而不新增行，因此行数等于去重后的 (日, 平台, 群, 用户) 组合数，
+    而非消息条数。名称字段（user_name/group_name）为 best-effort，取不到为空串，
+    绝不为统计而额外发起平台 API 请求。
+    """
+
+    __tablename__: str = "session_activity_stats"
+
+    id: int = Field(primary_key=True, sa_column_kwargs={"autoincrement": True})
+    date: str = Field(nullable=False, index=True)  # 本地自然日 "YYYY-MM-DD"
+    platform_id: str = Field(nullable=False, index=True)  # 适配器实例名
+    platform_type: str = Field(default="", nullable=False)  # 平台类型
+    message_type: str = Field(nullable=False)  # "GroupMessage" / "FriendMessage"
+    group_id: str = Field(default="", nullable=False)  # 群 ID；私聊为 ""
+    group_name: str = Field(default="", nullable=False)  # 群名（best-effort）
+    user_id: str = Field(nullable=False)  # 发送者 ID
+    user_name: str = Field(default="", nullable=False)  # 发送者昵称（best-effort）
+    count: int = Field(default=0, nullable=False)  # 当天该组合被处理的消息数
+
+    __table_args__ = (
+        UniqueConstraint(
+            "date",
+            "platform_id",
+            "group_id",
+            "user_id",
+            name="uix_session_activity_stats",
         ),
     )
 

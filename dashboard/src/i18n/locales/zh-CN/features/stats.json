@@ -5,15 +5,13 @@
     "subtitle": "平台、消息与模型调用的统一视图。",
     "notUpdated": "尚未更新"
   },
-  "ranges": {
-    "oneDay": "1 天",
-    "threeDays": "3 天",
-    "oneWeek": "1 周"
+  "filters": {
+    "date": "日期",
+    "platform": "适配器",
+    "allPlatforms": "全部适配器"
   },
   "rangeLabels": {
-    "oneDay": "最近 1 天",
-    "threeDays": "最近 3 天",
-    "oneWeek": "最近 1 周"
+    "today": "今日"
   },
   "overviewCards": {
     "platformCount": {
@@ -22,7 +20,23 @@
     },
     "messageCount": {
       "label": "消息总数",
-      "note": "累计消息量"
+      "note": "所选日期内消息量"
+    },
+    "distinctUsers": {
+      "label": "独立用户数",
+      "note": "所选日期内互动的不同用户"
+    },
+    "distinctUsersGroup": {
+      "label": "群聊独立用户",
+      "note": "群聊中互动的不同用户"
+    },
+    "distinctUsersPrivate": {
+      "label": "私聊独立用户",
+      "note": "私聊中互动的不同用户"
+    },
+    "distinctGroups": {
+      "label": "独立群数",
+      "note": "所选日期内互动的不同群聊"
     },
     "todayModelCalls": {
       "label": "今日模型调用",
@@ -39,7 +53,8 @@
     "uptime": {
       "label": "运行时间",
       "note": "启动于 {startTime}"
-    }
+    },
+    "cycleHint": "点击卡片切换口径"
   },
   "messageOverview": {
     "title": "消息概览",
@@ -59,7 +74,23 @@
     "subtitle": "{range}按指令触发次数排序",
     "plugin": "插件",
     "times": "次",
+    "regex": "正则",
     "total": "共 {count} 条"
+  },
+  "activeUsers": {
+    "title": "{range}活跃用户排行",
+    "subtitle": "按机器人处理的消息数排序",
+    "total": "共 {count} 位",
+    "tabs": {
+      "all": "全部",
+      "group": "群聊",
+      "private": "私聊"
+    }
+  },
+  "activeGroups": {
+    "title": "{range}活跃群排行",
+    "subtitle": "按机器人处理的消息数排序",
+    "total": "共 {count} 个"
   },
   "modelCalls": {
     "title": "模型调用",
@@ -89,7 +120,9 @@
     "platformStats": "当前没有平台消息统计数据。",
     "modelCalls": "{range}还没有模型调用数据。",
     "sessionCalls": "{range}还没有会话调用数据。",
-    "commandStats": "当前没有指令触发统计数据。"
+    "commandStats": "当前没有指令触发统计数据。",
+    "activeUsers": "所选日期内没有用户活跃数据。",
+    "activeGroups": "所选日期内没有群活跃数据。"
   },
   "chart": {
     "messages": "消息",

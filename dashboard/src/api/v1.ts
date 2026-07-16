@@ -1715,30 +1715,42 @@ export const conversationApi = {
 };
 
 export const statsApi = {
-  get(offsetSec?: number) {
-    return typed<any>(
-      openApiV1.getStats({
-        query: offsetSec === undefined ? undefined : { offset_sec: offsetSec },
-      }),
-    );
+  get(date?: string, platformId?: string) {
+    return httpClient.get<ApiEnvelope<any>>('/api/stat/get', {
+      params: {
+        ...(date ? { date } : {}),
+        ...(platformId ? { platform_id: platformId } : {}),
+      },
+    });
   },
-  providerTokens(days?: number) {
-    return typed<any>(
-      openApiV1.getProviderTokenStats({
-        query: days === undefined ? undefined : { days },
-      }),
-    );
+  providerTokens(date?: string, platformId?: string) {
+    return httpClient.get<ApiEnvelope<any>>('/api/stat/provider-tokens', {
+      params: {
+        ...(date ? { date } : {}),
+        ...(platformId ? { platform_id: platformId } : {}),
+      },
+    });
   },
-  topCommands(offsetSec?: number, limit?: number) {
+  topCommands(date?: string, platformId?: string, limit?: number) {
     return httpClient.get<ApiEnvelope<{ commands: any[] }>>(
       '/api/stat/top-commands',
       {
         params: {
-          ...(offsetSec === undefined ? {} : { offset_sec: offsetSec }),
+          ...(date ? { date } : {}),
+          ...(platformId ? { platform_id: platformId } : {}),
           ...(limit === undefined ? {} : { limit }),
         },
       },
     );
+  },
+  activeSessions(date?: string, platformId?: string, limit?: number) {
+    return httpClient.get<ApiEnvelope<any>>('/api/stat/active-sessions', {
+      params: {
+        ...(date ? { date } : {}),
+        ...(platformId ? { platform_id: platformId } : {}),
+        ...(limit === undefined ? {} : { limit }),
+      },
+    });
   },
   version() {
     return withLegacyFallback<VersionData>(openApiV1.getVersion(), () =>

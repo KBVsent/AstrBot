@@ -7,6 +7,28 @@
           <p class="stats-subtitle">{{ t('header.subtitle') }}</p>
         </div>
         <div class="header-meta">
+          <div class="filter-item">
+            <label class="filter-label">{{ t('filters.date') }}</label>
+            <input
+              v-model="selectedDate"
+              type="date"
+              class="filter-input"
+              :max="todayStr"
+            />
+          </div>
+          <div class="filter-item">
+            <label class="filter-label">{{ t('filters.platform') }}</label>
+            <select v-model="selectedPlatform" class="filter-input">
+              <option value="">{{ t('filters.allPlatforms') }}</option>
+              <option
+                v-for="platform in availablePlatforms"
+                :key="platform.id"
+                :value="platform.id"
+              >
+                {{ platform.name }}
+              </option>
+            </select>
+          </div>
           <div class="meta-pill">
             <v-icon size="16">mdi-refresh</v-icon>
             <span>{{ lastUpdatedLabel }}</span>
@@ -31,15 +53,33 @@
         <div class="overview-grid">
           <section
             v-for="card in overviewCards"
-            :key="card.label"
+            :key="card.key || card.label"
             class="stat-card overview-card"
+            :class="{ 'overview-card--interactive': !!card.onClick }"
+            @click="card.onClick?.()"
           >
-            <div class="card-icon">
-              <v-icon size="18">{{ card.icon }}</v-icon>
+            <div class="card-top">
+              <div class="card-label">{{ card.label }}</div>
+              <div class="card-icon">
+                <v-icon size="20">{{ card.icon }}</v-icon>
+              </div>
             </div>
-            <div class="card-label">{{ card.label }}</div>
             <div class="card-value">{{ card.value }}</div>
-            <div class="card-note">{{ card.note }}</div>
+            <div class="card-note">
+              <span>{{ card.note }}</span>
+              <span
+                v-if="card.stepCount"
+                class="card-dots"
+                :title="t('overviewCards.cycleHint')"
+              >
+                <span
+                  v-for="i in card.stepCount"
+                  :key="i"
+                  class="card-dot"
+                  :class="{ 'card-dot--active': i - 1 === card.activeIndex }"
+                />
+              </span>
+            </div>
           </section>
         </div>
 
@@ -47,18 +87,6 @@
           <div>
             <div class="section-title">{{ t('messageOverview.title') }}</div>
             <div class="section-subtitle">{{ t('messageOverview.subtitle') }}</div>
-          </div>
-          <div class="range-switch">
-            <button
-              v-for="option in rangeOptions"
-              :key="`toolbar-${option.value}`"
-              type="button"
-              class="range-chip"
-              :class="{ active: selectedRange === option.value }"
-              @click="selectedRange = option.value"
-            >
-              {{ t(option.labelKey) }}
-            </button>
           </div>
         </div>
 
@@ -119,17 +147,116 @@
             <div
               v-for="command in commandStats"
               :key="`${command.plugin_name}/${command.command_name}`"
-              class="provider-row"
+              class="provider-row command-row"
             >
-              <span class="provider-name">
+              <v-icon
+                v-if="command.trigger_type === 'regex'"
+                class="command-regex"
+                size="16"
+                :title="t('commandRanking.regex')"
+              >mdi-regex</v-icon>
+              <span class="command-name" :title="command.command_name">
                 {{ command.command_name }}
-                <span v-if="command.plugin_name" class="command-plugin">{{ command.plugin_name }}</span>
               </span>
+              <span v-if="command.plugin_name" class="command-plugin">{{ command.plugin_name }}</span>
               <strong class="command-count">{{ formatNumber(command.count) }} {{ t('commandRanking.times') }}</strong>
             </div>
           </div>
           <div v-else-if="!loading" class="empty-state">{{ t('empty.commandStats') }}</div>
         </section>
+
+        <div class="panel-grid panel-grid--spaced">
+          <section class="stat-card provider-list-card">
+            <div class="card-head compact">
+              <div>
+                <div class="section-title">{{ t('activeUsers.title', { range: rangeLabel }) }}</div>
+                <div class="section-subtitle">{{ t('activeUsers.subtitle') }}</div>
+              </div>
+              <div class="card-head-right">
+                <div class="scope-tabs">
+                  <button
+                    v-for="tab in activeUserTabs"
+                    :key="tab.key"
+                    class="scope-tab"
+                    :class="{ 'scope-tab--active': activeUserTab === tab.key }"
+                    @click="activeUserTab = tab.key"
+                  >
+                    {{ tab.label }}
+                  </button>
+                </div>
+                <div class="section-badge">
+                  {{ t('activeUsers.total', { count: formatNumber(activeUserTotal) }) }}
+                </div>
+              </div>
+            </div>
+            <div v-if="activeUserRanking.length" class="provider-list provider-list--scrollable">
+              <div
+                v-for="item in activeUserRanking"
+                :key="`u:${item.platform_id}/${item.user_id}`"
+                class="provider-row"
+                :class="{ 'provider-row--expandable': !!(item.user_name && item.user_name !== item.user_id) }"
+                @click="item.user_name && item.user_name !== item.user_id && toggleActiveRow(`u:${item.platform_id}/${item.user_id}`)"
+              >
+                <div class="provider-identity">
+                  <div class="provider-name-line">
+                    <span class="provider-name">{{ item.user_name || item.user_id }}</span>
+                    <v-icon
+                      v-if="item.user_name && item.user_name !== item.user_id"
+                      size="16"
+                      class="provider-toggle"
+                      :class="{ 'provider-toggle--open': expandedActiveRows.has(`u:${item.platform_id}/${item.user_id}`) }"
+                    >mdi-chevron-down</v-icon>
+                  </div>
+                  <span
+                    v-if="item.user_name && item.user_name !== item.user_id && expandedActiveRows.has(`u:${item.platform_id}/${item.user_id}`)"
+                    class="provider-subid"
+                  >{{ item.user_id }}</span>
+                </div>
+                <strong>{{ formatNumber(item.count) }} {{ t('commandRanking.times') }}</strong>
+              </div>
+            </div>
+            <div v-else class="empty-state">{{ t('empty.activeUsers') }}</div>
+          </section>
+
+          <section class="stat-card provider-list-card">
+            <div class="card-head compact">
+              <div>
+                <div class="section-title">{{ t('activeGroups.title', { range: rangeLabel }) }}</div>
+                <div class="section-subtitle">{{ t('activeGroups.subtitle') }}</div>
+              </div>
+              <div class="section-badge">
+                {{ t('activeGroups.total', { count: formatNumber(activeSessions?.distinct_groups ?? 0) }) }}
+              </div>
+            </div>
+            <div v-if="activeGroupRanking.length" class="provider-list provider-list--scrollable">
+              <div
+                v-for="item in activeGroupRanking"
+                :key="`g:${item.platform_id}/${item.group_id}`"
+                class="provider-row"
+                :class="{ 'provider-row--expandable': !!(item.group_name && item.group_name !== item.group_id) }"
+                @click="item.group_name && item.group_name !== item.group_id && toggleActiveRow(`g:${item.platform_id}/${item.group_id}`)"
+              >
+                <div class="provider-identity">
+                  <div class="provider-name-line">
+                    <span class="provider-name">{{ item.group_name || item.group_id }}</span>
+                    <v-icon
+                      v-if="item.group_name && item.group_name !== item.group_id"
+                      size="16"
+                      class="provider-toggle"
+                      :class="{ 'provider-toggle--open': expandedActiveRows.has(`g:${item.platform_id}/${item.group_id}`) }"
+                    >mdi-chevron-down</v-icon>
+                  </div>
+                  <span
+                    v-if="item.group_name && item.group_name !== item.group_id && expandedActiveRows.has(`g:${item.platform_id}/${item.group_id}`)"
+                    class="provider-subid"
+                  >{{ item.group_id }}</span>
+                </div>
+                <strong>{{ formatNumber(item.count) }} {{ t('commandRanking.times') }}</strong>
+              </div>
+            </div>
+            <div v-else class="empty-state">{{ t('empty.activeGroups') }}</div>
+          </section>
+        </div>
 
         <div class="token-section-head">
           <div>
@@ -235,7 +362,6 @@ import { useTheme } from 'vuetify'
 import { statsApi } from '@/api/v1'
 import { useI18n, useModuleI18n } from '@/i18n/composables'
 
-type TokenRange = 1 | 3 | 7
 type ChartSeries = Array<{
   name: string
   data: unknown[]
@@ -247,6 +373,12 @@ interface RunningStats {
   seconds: number
 }
 
+interface PlatformOption {
+  id: string
+  name: string
+  type: string
+}
+
 interface BaseStatsResponse {
   message_count: number
   platform_count: number
@@ -256,6 +388,7 @@ interface BaseStatsResponse {
     timestamp: number
   }>
   message_time_series: Array<[number, number]>
+  available_platforms: PlatformOption[]
   memory: {
     process: number
     system: number
@@ -264,6 +397,45 @@ interface BaseStatsResponse {
   running: RunningStats
   thread_count: number
   start_time: number
+}
+
+interface ActiveUserItem {
+  platform_id: string
+  user_id: string
+  user_name: string
+  count: number
+}
+
+interface ActiveGroupItem {
+  platform_id: string
+  group_id: string
+  group_name: string
+  count: number
+}
+
+interface ActiveSessionsResponse {
+  distinct_users: number
+  distinct_users_group: number
+  distinct_users_private: number
+  distinct_groups: number
+  total_messages: number
+  top_users: ActiveUserItem[]
+  top_users_group: ActiveUserItem[]
+  top_users_private: ActiveUserItem[]
+  top_groups: ActiveGroupItem[]
+}
+
+type ActiveScope = 'all' | 'group' | 'private'
+
+interface OverviewCard {
+  label: string
+  value: string
+  note: string
+  icon: string
+  key?: string
+  onClick?: () => void
+  stepCount?: number
+  activeIndex?: number
 }
 
 interface ProviderTrendItem {
@@ -283,7 +455,6 @@ interface UmoRankingItem {
 }
 
 interface ProviderTokenStatsResponse {
-  days: TokenRange
   trend: {
     series: ProviderTrendItem[]
     total_series: Array<[number, number]>
@@ -304,6 +475,7 @@ interface ProviderTokenStatsResponse {
 interface CommandRankingItem {
   command_name: string
   plugin_name: string
+  trigger_type: string
   count: number
 }
 
@@ -315,7 +487,19 @@ const errorMessage = ref('')
 const baseStats = ref<BaseStatsResponse | null>(null)
 const providerStats = ref<ProviderTokenStatsResponse | null>(null)
 const commandStats = ref<CommandRankingItem[]>([])
-const selectedRange = ref<TokenRange>(1)
+const activeSessions = ref<ActiveSessionsResponse | null>(null)
+const availablePlatforms = ref<PlatformOption[]>([])
+
+function localDateStr(date: Date): string {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const todayStr = localDateStr(new Date())
+const selectedDate = ref<string>(todayStr)
+const selectedPlatform = ref<string>('')
 const lastUpdatedAt = ref<Date | null>(null)
 const isDark = computed(() => theme.global.current.value.dark)
 const themePalette = computed(() => {
@@ -423,25 +607,40 @@ function aggregateOverflowSeries(series: ProviderTrendItem[]): ProviderTrendItem
   ]
 }
 
+function currentPlatform(): string | undefined {
+  return selectedPlatform.value || undefined
+}
+
 async function fetchBaseStats(): Promise<void> {
-  const response = await statsApi.get(selectedRange.value * 24 * 60 * 60)
+  const response = await statsApi.get(selectedDate.value, currentPlatform())
   baseStats.value = response.data.data
+  availablePlatforms.value = response.data.data?.available_platforms ?? []
 }
 
 async function fetchProviderStats(): Promise<void> {
-  const response = await statsApi.providerTokens(selectedRange.value)
+  const response = await statsApi.providerTokens(selectedDate.value, currentPlatform())
   providerStats.value = response.data.data
 }
 
 async function fetchCommandStats(): Promise<void> {
-  const response = await statsApi.topCommands(selectedRange.value * 24 * 60 * 60, 100)
+  const response = await statsApi.topCommands(selectedDate.value, currentPlatform(), 100)
   commandStats.value = response.data.data?.commands ?? []
+}
+
+async function fetchActiveSessions(): Promise<void> {
+  const response = await statsApi.activeSessions(selectedDate.value, currentPlatform(), 50)
+  activeSessions.value = response.data.data
 }
 
 async function refreshStats(): Promise<void> {
   try {
     errorMessage.value = ''
-    await Promise.all([fetchBaseStats(), fetchProviderStats(), fetchCommandStats()])
+    await Promise.all([
+      fetchBaseStats(),
+      fetchProviderStats(),
+      fetchCommandStats(),
+      fetchActiveSessions()
+    ])
     lastUpdatedAt.value = new Date()
   } catch (error) {
     console.error('Failed to load stats page data:', error)
@@ -450,12 +649,6 @@ async function refreshStats(): Promise<void> {
     loading.value = false
   }
 }
-
-const rangeOptions = computed(() => [
-  { labelKey: 'ranges.oneDay', value: 1 as TokenRange },
-  { labelKey: 'ranges.threeDays', value: 3 as TokenRange },
-  { labelKey: 'ranges.oneWeek', value: 7 as TokenRange }
-])
 
 const lastUpdatedLabel = computed(() => {
   if (!lastUpdatedAt.value) return t('header.notUpdated')
@@ -467,12 +660,11 @@ const lastUpdatedLabel = computed(() => {
 })
 
 const rangeLabel = computed(() => {
-  if (selectedRange.value === 3) return t('rangeLabels.threeDays')
-  if (selectedRange.value === 7) return t('rangeLabels.oneWeek')
-  return t('rangeLabels.oneDay')
+  if (selectedDate.value === todayStr) return t('rangeLabels.today')
+  return selectedDate.value
 })
 
-const overviewCards = computed(() => [
+const overviewCards = computed<OverviewCard[]>(() => [
   {
     label: t('overviewCards.platformCount.label'),
     value: formatNumber(baseStats.value?.platform_count ?? 0),
@@ -484,6 +676,13 @@ const overviewCards = computed(() => [
     value: formatNumber(baseStats.value?.message_count ?? 0),
     note: t('overviewCards.messageCount.note'),
     icon: 'mdi-message-outline'
+  },
+  distinctUsersCard.value,
+  {
+    label: t('overviewCards.distinctGroups.label'),
+    value: formatNumber(activeSessions.value?.distinct_groups ?? 0),
+    note: t('overviewCards.distinctGroups.note'),
+    icon: 'mdi-account-group-outline'
   },
   {
     label: t('overviewCards.todayModelCalls.label'),
@@ -562,6 +761,79 @@ const platformRanking = computed(() =>
     .slice(0, 6)
 )
 
+const activeUserTab = ref<ActiveScope>('all')
+
+const activeUserTabs = computed(() => [
+  { key: 'all' as ActiveScope, label: t('activeUsers.tabs.all') },
+  { key: 'group' as ActiveScope, label: t('activeUsers.tabs.group') },
+  { key: 'private' as ActiveScope, label: t('activeUsers.tabs.private') },
+])
+
+const activeUserRanking = computed(() => {
+  const source =
+    activeUserTab.value === 'group'
+      ? activeSessions.value?.top_users_group
+      : activeUserTab.value === 'private'
+        ? activeSessions.value?.top_users_private
+        : activeSessions.value?.top_users
+  return (source ?? []).slice(0, 20)
+})
+
+const activeUserTotal = computed(() => {
+  if (activeUserTab.value === 'group') {
+    return activeSessions.value?.distinct_users_group ?? 0
+  }
+  if (activeUserTab.value === 'private') {
+    return activeSessions.value?.distinct_users_private ?? 0
+  }
+  return activeSessions.value?.distinct_users ?? 0
+})
+
+const distinctUserMode = ref<ActiveScope>('all')
+const distinctUserModeOrder: ActiveScope[] = ['all', 'group', 'private']
+
+function cycleDistinctUserMode(): void {
+  const idx = distinctUserModeOrder.indexOf(distinctUserMode.value)
+  distinctUserMode.value = distinctUserModeOrder[(idx + 1) % distinctUserModeOrder.length]
+}
+
+const distinctUsersCard = computed(() => {
+  const mode = distinctUserMode.value
+  const suffix = mode === 'group' ? 'Group' : mode === 'private' ? 'Private' : ''
+  const value =
+    mode === 'group'
+      ? activeSessions.value?.distinct_users_group
+      : mode === 'private'
+        ? activeSessions.value?.distinct_users_private
+        : activeSessions.value?.distinct_users
+  return {
+    key: 'distinctUsers',
+    label: t(`overviewCards.distinctUsers${suffix}.label`),
+    value: formatNumber(value ?? 0),
+    note: t(`overviewCards.distinctUsers${suffix}.note`),
+    icon: 'mdi-account-multiple-outline',
+    onClick: cycleDistinctUserMode,
+    stepCount: distinctUserModeOrder.length,
+    activeIndex: distinctUserModeOrder.indexOf(mode),
+  }
+})
+
+const activeGroupRanking = computed(() =>
+  (activeSessions.value?.top_groups ?? []).slice(0, 20)
+)
+
+const expandedActiveRows = ref<Set<string>>(new Set())
+
+function toggleActiveRow(key: string): void {
+  const next = new Set(expandedActiveRows.value)
+  if (next.has(key)) {
+    next.delete(key)
+  } else {
+    next.add(key)
+  }
+  expandedActiveRows.value = next
+}
+
 const startTimeLabel = computed(() =>
   formatDateTime(baseStats.value?.start_time ?? 0)
 )
@@ -632,7 +904,12 @@ const messageChartOptions = computed<ApexOptions>(() => ({
   tooltip: {
     theme: isDark.value ? 'dark' : 'light',
     x: {
-      format: 'MM/dd HH:mm'
+      formatter: (value: number) => {
+        const start = new Date(value)
+        const end = new Date(value + 3600_000)
+        const pad = (n: number) => String(n).padStart(2, '0')
+        return `${pad(start.getHours())}:00–${pad(end.getHours())}:00`
+      }
     }
   },
   legend: { show: false }
@@ -691,13 +968,21 @@ const providerChartOptions = computed<ApexOptions>(() => ({
   }
 }))
 
-watch(selectedRange, async () => {
+watch([selectedDate, selectedPlatform], async () => {
+  loading.value = true
   try {
-    await Promise.all([fetchBaseStats(), fetchProviderStats(), fetchCommandStats()])
+    await Promise.all([
+      fetchBaseStats(),
+      fetchProviderStats(),
+      fetchCommandStats(),
+      fetchActiveSessions()
+    ])
     lastUpdatedAt.value = new Date()
   } catch (error) {
     console.error('Failed to refresh stats range:', error)
     errorMessage.value = t('errors.rangeFailed')
+  } finally {
+    loading.value = false
   }
 })
 
@@ -777,6 +1062,41 @@ onBeforeUnmount(() => {
 .header-meta {
   display: flex;
   gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.filter-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filter-label {
+  font-size: 12px;
+  color: var(--stats-muted);
+  padding-left: 2px;
+}
+
+.filter-input {
+  padding: 8px 12px;
+  border: 1px solid var(--stats-border);
+  border-radius: 10px;
+  background: var(--stats-surface);
+  color: var(--stats-text);
+  font-size: 13px;
+  min-width: 140px;
+  outline: none;
+  cursor: pointer;
+}
+
+.filter-input:focus {
+  border-color: rgb(var(--v-theme-primary));
+}
+
+.stats-page.is-dark .filter-input {
+  border-color: var(--stats-border-strong);
+  color-scheme: dark;
 }
 
 .meta-pill {
@@ -805,7 +1125,9 @@ onBeforeUnmount(() => {
 
 .overview-grid {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  /* 固定 4 列：8 张卡片正好 4+4 两行铺满；断点降到 2 / 1 列也都能整除，
+     任何宽度下末行都不会留空 */
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
   margin-bottom: 20px;
 }
@@ -817,6 +1139,13 @@ onBeforeUnmount(() => {
   gap: 20px;
   margin-bottom: 20px;
   align-items: stretch;
+}
+
+/* 与上方独立卡片（指令使用排名）拉开间距，保持整页 20px 的垂直节奏；
+   两个同级排行卡片用等宽，避免继承 1.6/0.9 造成左宽右窄 */
+.panel-grid--spaced {
+  margin-top: 20px;
+  grid-template-columns: 1fr 1fr;
 }
 
 .panel-grid > *,
@@ -849,18 +1178,108 @@ onBeforeUnmount(() => {
 }
 
 .overview-card {
-  padding: 20px 20px 18px;
+  display: flex;
+  flex-direction: column;
+  min-height: 148px;
+  padding: 22px 24px;
+}
+
+.overview-card--interactive {
+  cursor: pointer;
+  transition: border-color 0.2s ease, transform 0.1s ease;
+}
+
+.overview-card--interactive:hover {
+  border-color: rgb(var(--v-theme-primary));
+}
+
+.overview-card--interactive:active {
+  transform: scale(0.99);
+}
+
+.card-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.card-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--stats-border-strong, rgba(128, 128, 128, 0.35));
+  transition: background 0.2s ease, width 0.2s ease;
+}
+
+.card-dot--active {
+  width: 16px;
+  background: rgb(var(--v-theme-primary));
+}
+
+.overview-card--interactive:hover .card-dot {
+  background: var(--stats-text-secondary, #999);
+}
+
+.overview-card--interactive:hover .card-dot--active {
+  background: rgb(var(--v-theme-primary));
+}
+
+.card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.scope-tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--stats-soft, rgba(128, 128, 128, 0.08));
+  width: fit-content;
+}
+
+.scope-tab {
+  padding: 4px 14px;
+  border: 0;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--stats-text-secondary, #888);
+  background: transparent;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.scope-tab--active {
+  color: rgb(var(--v-theme-primary));
+  background: var(--stats-card-bg, #fff);
+  font-weight: 600;
+}
+
+.stats-page.is-dark .scope-tab--active {
+  background: var(--stats-border-strong, rgba(255, 255, 255, 0.12));
+  color: #fff;
 }
 
 .card-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 40px;
+  height: 40px;
   border-radius: 12px;
   background: var(--stats-soft);
   color: rgb(var(--v-theme-primary));
+  flex-shrink: 0;
 }
 
 .stats-page.is-dark .card-icon {
@@ -869,9 +1288,8 @@ onBeforeUnmount(() => {
 }
 
 .card-label {
-  margin-top: 8px;
   color: var(--stats-muted);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
 }
 
@@ -883,15 +1301,20 @@ onBeforeUnmount(() => {
 }
 
 .card-value {
-  margin-top: 8px;
-  font-size: clamp(24px, 2vw, 34px);
+  margin-top: 16px;
+  font-size: clamp(28px, 2.2vw, 40px);
   line-height: 1.1;
   font-weight: 700;
   letter-spacing: -0.03em;
 }
 
 .card-note {
-  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 10px;
   color: var(--stats-subtle);
   font-size: 12px;
   line-height: 1.5;
@@ -1019,46 +1442,6 @@ onBeforeUnmount(() => {
   margin-bottom: 16px;
 }
 
-.range-switch {
-  display: inline-flex;
-  gap: 8px;
-  padding: 6px;
-  border: 1px solid var(--stats-border);
-  border-radius: 999px;
-  background: var(--stats-surface);
-}
-
-.stats-page.is-dark .range-switch {
-  border-color: var(--stats-border-strong);
-  background: var(--stats-surface);
-}
-
-.range-chip {
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--stats-muted);
-  padding: 9px 14px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 0.18s ease, color 0.18s ease;
-}
-
-.range-chip.active {
-  background: var(--stats-soft);
-  color: rgb(var(--v-theme-primary));
-}
-
-.stats-page.is-dark .range-chip {
-  color: var(--stats-muted);
-}
-
-.stats-page.is-dark .range-chip.active {
-  background: var(--stats-soft-strong);
-  color: rgb(var(--v-theme-primary));
-}
-
 .token-total-card {
   display: flex;
   flex-direction: column;
@@ -1130,6 +1513,23 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 
+.command-row {
+  gap: 8px;
+}
+
+.command-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-regex {
+  flex-shrink: 0;
+  color: rgb(var(--v-theme-primary));
+}
+
 .section-badge {
   flex-shrink: 0;
   align-self: center;
@@ -1163,8 +1563,48 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.provider-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.provider-name-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.provider-row--expandable {
+  cursor: pointer;
+}
+
+.provider-row--expandable:hover .provider-name {
+  color: rgb(var(--v-theme-primary));
+}
+
+.provider-toggle {
+  flex-shrink: 0;
+  font-size: 16px;
+  color: var(--stats-text-secondary, #888);
+  transition: transform 0.2s ease;
+}
+
+.provider-toggle--open {
+  transform: rotate(180deg);
+}
+
+.provider-subid {
+  font-size: 12px;
+  color: var(--stats-text-secondary, #888);
+  word-break: break-all;
+}
+
 .command-plugin {
-  margin-left: 8px;
+  flex-shrink: 0;
   padding: 1px 8px;
   border-radius: 10px;
   font-size: 12px;
@@ -1186,12 +1626,6 @@ onBeforeUnmount(() => {
 .empty-state.large {
   padding: 56px 0;
   text-align: center;
-}
-
-@media (max-width: 1400px) {
-  .overview-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
 }
 
 @media (max-width: 1080px) {

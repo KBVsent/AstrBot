@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from datetime import datetime
 
 from astrbot.core import logger
 from astrbot.core.platform import AstrMessageEvent
@@ -7,6 +8,7 @@ from astrbot.core.platform.sources.wecom_ai_bot.wecomai_event import (
     WecomAIBotMessageEvent,
 )
 from astrbot.core.utils.active_event_registry import active_event_registry
+from astrbot.core.utils.stat_recorders import session_activity_recorder
 
 from .bootstrap import ensure_builtin_stages_registered
 from .context import PipelineContext
@@ -95,3 +97,33 @@ class PipelineScheduler:
             event.cleanup_temporary_local_files()
             active_event_registry.unregister(event)
             event._pipeline_finished.set()
+            # 记录会话活跃统计（仅统计机器人实际处理并回复的消息）
+            if event._has_send_oper:
+                _record_session_activity(event)
+
+
+def _record_session_activity(event: AstrMessageEvent) -> None:
+    """把一次会话活跃合并进内存聚合器（同步、无 IO）。
+
+    仅在机器人本次事件中有过发送操作时调用。名称字段为 best-effort：昵称直接读
+    事件，群名仅读消息对象里适配器顺带填好的值，绝不为统计额外发起平台 API 请求。
+    实际落库由 session_activity_recorder 的单个后台 worker 周期性批量完成。
+    """
+    try:
+        user_id = event.get_sender_id()
+        if not user_id:
+            return
+        group_obj = getattr(event.message_obj, "group", None)
+        group_name = getattr(group_obj, "group_name", "") or ""
+        session_activity_recorder.record(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            platform_id=event.get_platform_id(),
+            platform_type=event.platform_meta.name,
+            message_type=event.get_message_type().value,
+            group_id=event.get_group_id(),
+            group_name=group_name,
+            user_id=user_id,
+            user_name=event.get_sender_name(),
+        )
+    except Exception as e:
+        logger.error(f"记录会话活跃统计失败: {e}")
