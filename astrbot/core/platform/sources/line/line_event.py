@@ -1,6 +1,7 @@
 import asyncio
 import os
 import re
+import shutil
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
@@ -16,10 +17,13 @@ from astrbot.api.message_components import (
     Record,
     Video,
 )
+from astrbot.core import astrbot_config, file_token_service
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.utils.media_utils import get_media_duration
 
 from .line_api import LineAPIClient
+
+LINE_MAX_MESSAGES_PER_REPLY = 5
 
 
 class LineMessageEvent(AstrMessageEvent):
@@ -33,6 +37,16 @@ class LineMessageEvent(AstrMessageEvent):
     ) -> None:
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.line_api = line_api
+
+        # LINE 的 reply token 单次有效、仅约 1 分钟内可用、单次最多 5 条消息
+        raw = message_obj.raw_message
+        self._reply_token = (
+            str(raw.get("replyToken") or "") if isinstance(raw, dict) else ""
+        )
+        self._pending_messages: list[dict] = []
+        self._reply_dropped = 0
+        self._flush_task: asyncio.Task | None = None
+        self._flushed = False
 
     @staticmethod
     async def _component_to_message_object(
@@ -51,13 +65,15 @@ class LineMessageEvent(AstrMessageEvent):
             return {"type": "text", "text": f"@{name}"[:5000]}
 
         if isinstance(segment, Image):
-            image_url = await LineMessageEvent._resolve_image_url(segment)
-            if not image_url:
+            original_url, preview_url = await LineMessageEvent._resolve_image_urls(
+                segment
+            )
+            if not original_url or not preview_url:
                 return None
             return {
                 "type": "image",
-                "originalContentUrl": image_url,
-                "previewImageUrl": image_url,
+                "originalContentUrl": original_url,
+                "previewImageUrl": preview_url,
             }
 
         if isinstance(segment, Record):
@@ -102,15 +118,19 @@ class LineMessageEvent(AstrMessageEvent):
         return None
 
     @staticmethod
-    async def _resolve_image_url(segment: Image) -> str:
+    async def _resolve_image_urls(segment: Image) -> tuple[str, str]:
         candidate = (segment.url or segment.file or "").strip()
         if candidate.startswith("https://"):
-            return candidate
+            return candidate, candidate
         try:
-            return await segment.register_to_file_service()
+            file_path = await segment.convert_to_file_path()
+            urls = await LineMessageEvent._register_local_media(
+                file_path, token_count=2
+            )
+            return urls[0], urls[1]
         except Exception as e:
             logger.debug("[LINE] resolve image url failed: %s", e)
-            return ""
+            return "", ""
 
     @staticmethod
     async def _resolve_record_url(segment: Record) -> str:
@@ -118,7 +138,8 @@ class LineMessageEvent(AstrMessageEvent):
         if candidate.startswith("https://"):
             return candidate
         try:
-            return await segment.register_to_file_service()
+            file_path = await segment.convert_to_file_path()
+            return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve record url failed: %s", e)
             return ""
@@ -140,7 +161,8 @@ class LineMessageEvent(AstrMessageEvent):
         if candidate.startswith("https://"):
             return candidate
         try:
-            return await segment.register_to_file_service()
+            file_path = await segment.convert_to_file_path()
+            return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve video url failed: %s", e)
             return ""
@@ -154,7 +176,8 @@ class LineMessageEvent(AstrMessageEvent):
         if cover_candidate:
             try:
                 cover_seg = Image(file=cover_candidate)
-                return await cover_seg.register_to_file_service()
+                cover_path = await cover_seg.convert_to_file_path()
+                return (await LineMessageEvent._register_local_media(cover_path))[0]
             except Exception as e:
                 logger.debug("[LINE] resolve video cover failed: %s", e)
 
@@ -182,7 +205,8 @@ class LineMessageEvent(AstrMessageEvent):
                 return ""
 
             cover_seg = Image.fromFileSystem(str(thumb_path))
-            return await cover_seg.register_to_file_service()
+            cover_path = await cover_seg.convert_to_file_path()
+            return (await LineMessageEvent._register_local_media(cover_path))[0]
         except Exception as e:
             logger.debug("[LINE] generate video preview failed: %s", e)
             return ""
@@ -192,10 +216,51 @@ class LineMessageEvent(AstrMessageEvent):
         if segment.url and segment.url.startswith("https://"):
             return segment.url
         try:
-            return await segment.register_to_file_service()
+            file_path = await segment.get_file(allow_return_url=False)
+            if not file_path:
+                return ""
+            return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve file url failed: %s", e)
             return ""
+
+    @staticmethod
+    async def _register_local_media(
+        file_path: str,
+        token_count: int = 1,
+    ) -> list[str]:
+        """Copy LINE media into global temp storage and register download tokens.
+
+        Args:
+            file_path: Local media path to expose to LINE.
+            token_count: Number of single-use URLs to register for the media copy.
+
+        Returns:
+            Public callback URLs backed by the LINE-owned temporary copy.
+
+        Raises:
+            ValueError: The public callback base URL is not configured.
+            FileNotFoundError: The local media file does not exist.
+        """
+        callback_host = str(astrbot_config.get("callback_api_base", "")).rstrip("/")
+        if not callback_host:
+            raise ValueError("未配置 callback_api_base，文件服务不可用")
+
+        source_path = Path(file_path)
+        if not source_path.is_file():
+            raise FileNotFoundError(f"LINE media file does not exist: {file_path}")
+
+        outbound_dir = Path(get_astrbot_temp_path()) / "line_outbound"
+        outbound_dir.mkdir(parents=True, exist_ok=True)
+        outbound_path = outbound_dir / f"{uuid.uuid4().hex}{source_path.suffix}"
+        await asyncio.to_thread(shutil.copyfile, source_path, outbound_path)
+
+        urls = []
+        for _ in range(token_count):
+            token = await file_token_service.register_file(str(outbound_path))
+            urls.append(f"{callback_host}/api/file/{token}")
+        logger.debug("[LINE] registered %s outbound media URL(s).", len(urls))
+        return urls
 
     @staticmethod
     async def _resolve_file_size(segment: File) -> int:
@@ -227,24 +292,69 @@ class LineMessageEvent(AstrMessageEvent):
 
     async def send(self, message: MessageChain) -> None:
         messages = await self.build_line_messages(message)
+        if messages:
+            self._enqueue(messages)
+        await super().send(message)
+
+    def _enqueue(self, messages: list[dict]) -> None:
+        """将消息累积到缓冲区，并确保已安排 pipeline 结束后的一次性发送。"""
+        if self._flushed:
+            # pipeline 已结束、reply token 已消耗，无法再回复。
+            self._reply_dropped += len(messages)
+            logger.warning(
+                "[LINE] reply already sent, %s late message(s) dropped.",
+                len(messages),
+            )
+            return
+
+        remaining = LINE_MAX_MESSAGES_PER_REPLY - len(self._pending_messages)
+        if remaining <= 0:
+            self._reply_dropped += len(messages)
+            return
+
+        self._pending_messages.extend(messages[:remaining])
+        if len(messages) > remaining:
+            self._reply_dropped += len(messages) - remaining
+
+        if self._flush_task is None:
+            self._flush_task = asyncio.create_task(self._flush_when_finished())
+
+    async def _flush_when_finished(self) -> None:
+        try:
+            await self._pipeline_finished.wait()
+        finally:
+            await self._flush()
+
+    async def _flush(self) -> None:
+        if self._flushed:
+            return
+        self._flushed = True
+
+        messages = self._pending_messages[:LINE_MAX_MESSAGES_PER_REPLY]
+        self._pending_messages = []
+        if self._reply_dropped:
+            logger.warning(
+                "[LINE] reply limited to %s messages, %s extra segment(s) dropped.",
+                LINE_MAX_MESSAGES_PER_REPLY,
+                self._reply_dropped,
+            )
         if not messages:
             return
 
-        raw = self.message_obj.raw_message
-        reply_token = ""
-        if isinstance(raw, dict):
-            reply_token = str(raw.get("replyToken") or "")
+        if not self._reply_token:
+            logger.warning(
+                "[LINE] no reply token available, %s message(s) not sent.",
+                len(messages),
+            )
+            return
 
-        sent = False
-        if reply_token:
-            sent = await self.line_api.reply_message(reply_token, messages)
-
+        sent = await self.line_api.reply_message(self._reply_token, messages)
         if not sent:
-            target_id = self.get_group_id() or self.get_sender_id()
-            if target_id:
-                await self.line_api.push_message(target_id, messages)
-
-        await super().send(message)
+            logger.error(
+                "[LINE] reply failed (token may be invalid or expired), "
+                "%s message(s) not sent.",
+                len(messages),
+            )
 
     async def send_streaming(
         self,
