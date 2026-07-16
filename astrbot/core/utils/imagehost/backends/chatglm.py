@@ -12,8 +12,6 @@ from pathlib import Path
 
 import httpx
 
-from ._imagehost_http import http_kwargs
-
 DEFAULT_TIMEOUT = 10.0
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
@@ -61,8 +59,8 @@ class ChatGLMImageHost:
         self.timeout = timeout
 
     @classmethod
-    def from_env(cls, *, env_file: str | Path | None = None) -> ChatGLMImageHost:
-        # 无需登录凭证；保留 env_file 形参以对齐其它图床的 from_env 签名。
+    def from_config(cls, _entry: dict) -> ChatGLMImageHost:
+        # 无需登录凭证；忽略 entry 里的凭据字段。
         return cls()
 
     def upload_bytes(self, body: bytes, *, filename: str | None = None) -> str:
@@ -78,7 +76,7 @@ class ChatGLMImageHost:
             _ENDPOINT,
             files={"file": (f"image.{ext}", body, mime_type)},
             headers={"User-Agent": _USER_AGENT, "Accept-Encoding": "gzip, deflate, br"},
-            **http_kwargs(self.timeout),
+            timeout=self.timeout,
         )
         if resp.status_code != 200:
             raise RuntimeError(f"ChatGLM 上传失败 (HTTP {resp.status_code})")

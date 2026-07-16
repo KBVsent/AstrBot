@@ -45,6 +45,10 @@
         "title": "缓存",
         "subtitle": "临时目录自动清理阈值。"
       },
+      "imageHost": {
+        "title": "图床",
+        "subtitle": "第三方图床后端，供平台适配器上传图片获取外链。"
+      },
       "t2iRendering": {
         "title": "文本转图像",
         "subtitle": "文本转图像渲染策略、端点和自定义模板。"

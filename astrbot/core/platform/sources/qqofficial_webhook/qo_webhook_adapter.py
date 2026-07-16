@@ -209,6 +209,7 @@ class QQOfficialWebhookPlatformAdapter(Platform):
             self.meta(),
             message.session_id,
             self.client,
+            image_host_chain=self.config.get("image_host_chain") or None,
         )
         webhook_helper = getattr(self, "webhook_helper", None)
         if webhook_helper and message.message_id:

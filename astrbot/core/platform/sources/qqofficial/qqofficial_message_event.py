@@ -102,9 +102,12 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         platform_meta: PlatformMetadata,
         session_id: str,
         bot: Client,
+        image_host_chain: list[str] | None = None,
     ) -> None:
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.bot = bot
+        # 图床后端 id 有序优先链（对应全局 image_host 的 id）；空则用全部已启用后端。
+        self._image_host_chain = image_host_chain
         self.send_buffer = None
         # bot 自己最后一条成功发出的消息 id，供 recall() 默认撤回使用
         self.last_sent_message_id: str | None = None
@@ -145,7 +148,9 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         if sent_id is not None:
             self.last_sent_message_id = sent_id
 
-    async def recall(self, message_id: str | None = None, hidetip: bool = False) -> bool:
+    async def recall(
+        self, message_id: str | None = None, hidetip: bool = False
+    ) -> bool:
         """撤回消息。
 
         Args:
@@ -433,6 +438,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         ) = await QQOfficialMessageEvent._parse_to_qqofficial(
             message_to_send,
             convert_image_to_markdown=convert_img,
+            image_host_chain=self._image_host_chain,
         )
         if record_file_path:
             self.track_temporary_local_file(record_file_path)
@@ -1041,6 +1047,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
     async def _parse_to_qqofficial(
         message: MessageChain,
         convert_image_to_markdown: bool = False,
+        image_host_chain: list[str] | None = None,
     ):
         """将 MessageChain 解析为发送 payload 所需要素。
 
@@ -1049,6 +1056,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             convert_image_to_markdown: 若为 True 且图片能注册到文件服务，则将图片
                 转成 markdown `![](url)` 语法追加到 plain_text，并跳过 base64 上传；
                 这样图片能和 keyboard/markdown 共存于同一条 msg_type=2 消息。
+            image_host_chain: 图床后端 id 有序优先链，透传给 image_to_markdown_fragment。
 
         Returns:
             (plain_text, image_base64, image_file_path, record_file_path,
@@ -1078,7 +1086,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             elif isinstance(i, Image):
                 # markdown 模式下尽量把图片转成 markdown 语法，以便与 keyboard 共存
                 if convert_image_to_markdown:
-                    fragment = await image_to_markdown_fragment(i)
+                    fragment = await image_to_markdown_fragment(i, image_host_chain)
                     if fragment is not None:
                         plain_text += fragment
                         continue

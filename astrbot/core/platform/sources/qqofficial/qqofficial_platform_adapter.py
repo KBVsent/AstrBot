@@ -427,6 +427,7 @@ class QQOfficialPlatformAdapter(Platform):
         ) = await QQOfficialMessageEvent._parse_to_qqofficial(
             message_chain,
             convert_image_to_markdown=convert_img,
+            image_host_chain=self.config.get("image_host_chain") or None,
         )
         if (
             not plain_text
@@ -698,6 +699,7 @@ class QQOfficialPlatformAdapter(Platform):
             self.meta(),
             message.session_id,
             self.client,
+            image_host_chain=self.config.get("image_host_chain") or None,
         )
 
     @staticmethod

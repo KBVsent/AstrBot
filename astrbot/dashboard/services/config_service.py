@@ -446,7 +446,19 @@ def save_config(
     if errors:
         raise ValueError(f"格式校验未通过: {errors}")
 
+    # 图床配置变更后清空后端缓存，下次上传按新配置重建（无需重启）
+    image_host_changed = (
+        is_core
+        and "image_host" in post_config
+        and post_config["image_host"] != config.get("image_host")
+    )
+
     config.save_config(post_config)
+
+    if image_host_changed:
+        from astrbot.core.utils.imagehost import reset_backends
+
+        reset_backends()
 
 
 class ConfigProfileService:

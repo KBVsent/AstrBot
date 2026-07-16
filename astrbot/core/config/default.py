@@ -305,6 +305,8 @@ DEFAULT_CONFIG = {
     "persona": [],  # deprecated
     "timezone": "Asia/Shanghai",
     "callback_api_base": "",
+    # 共享图床后端实例列表（供各适配器复用），JSON 字符串；每项 {id, type, enable, ...凭据}。
+    "image_host": ('[\n  {"id": "chatglm", "type": "chatglm", "enable": true}\n]'),
     "default_kb_collection": "",  # 默认知识库名称, 已经过时
     "plugin_set": ["*"],  # "*" 表示使用所有可用的插件, 空列表表示不使用任何插件
     "kb_names": [],  # 默认知识库名称列表
@@ -341,6 +343,7 @@ CONFIG_METADATA_2 = {
                         "secret": "",
                         "enable_group_c2c": True,
                         "enable_guild_direct_message": True,
+                        "image_host_chain": [],
                     },
                     "QQ 官方机器人(Webhook)": {
                         "id": "default",
@@ -353,6 +356,7 @@ CONFIG_METADATA_2 = {
                         "webhook_uuid": "",
                         "callback_server_host": "0.0.0.0",
                         "port": 6196,
+                        "image_host_chain": [],
                     },
                     "OneBot v11": {
                         "id": "default",
@@ -511,6 +515,7 @@ CONFIG_METADATA_2 = {
                         "channel_secret": "",
                         "unified_webhook_mode": True,
                         "webhook_uuid": "",
+                        "image_host_chain": [],
                     },
                     "Satori": {
                         "id": "satori",
@@ -553,6 +558,12 @@ CONFIG_METADATA_2 = {
                     # },
                 },
                 "items": {
+                    "image_host_chain": {
+                        "description": "图床优先链",
+                        "type": "list",
+                        "items": {"type": "string"},
+                        "hint": "图床后端 id 的优先顺序（对应全局设置里的 image_host id）；留空用全部已启用后端",
+                    },
                     # "webchat_link_path": {
                     #     "description": "链接路径",
                     #     "_special": "webchat_link_path",
@@ -3054,6 +3065,10 @@ CONFIG_METADATA_2 = {
             "callback_api_base": {
                 "type": "string",
             },
+            "image_host": {
+                "description": "图床后端",
+                "type": "string",
+            },
             "disable_metrics": {
                 "description": "禁用匿名使用统计",
                 "type": "bool",
@@ -4418,6 +4433,12 @@ CONFIG_METADATA_3_SYSTEM = {
                         "description": "Trace 日志大小上限 (MB)",
                         "type": "int",
                         "hint": "超过大小后自动轮转，默认 20MB。",
+                    },
+                    "image_host": {
+                        "description": "图床后端",
+                        "type": "string",
+                        "editor_mode": True,
+                        "hint": 'JSON 数组，把本地图片上传到图床得到长期外链，供各平台适配器复用。每项一个后端实例：{"id", "type", "enable", ...凭据}。适配器配置里的「图床优先链」按 id 引用，留空则按此处顺序用全部已启用后端。',
                     },
                     "pip_install_arg": {
                         "description": "pip 安装额外参数",

@@ -587,6 +587,9 @@ const systemConfigGroups = computed(() => {
         createGroup('tempStorage', [
             'temp_dir_max_size'
         ]),
+        createGroup('imageHost', [
+            'image_host'
+        ]),
         createGroup('t2iRendering', [
             't2i_strategy',
             't2i_endpoint',
@@ -597,7 +600,7 @@ const systemConfigGroups = computed(() => {
 });
 
 const generalSystemConfigGroups = computed(() => systemConfigGroups.value.filter((group) => (
-    group.key === 'runtime' || group.key === 'logs' || group.key === 'tempStorage'
+    group.key === 'runtime' || group.key === 'logs' || group.key === 'tempStorage' || group.key === 'imageHost'
 )));
 const appearanceSystemConfigGroups = computed(() => systemConfigGroups.value.filter((group) => (
     group.key === 't2iRendering'

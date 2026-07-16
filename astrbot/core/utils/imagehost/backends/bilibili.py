@@ -1,8 +1,8 @@
 """Bilibili 图床：把本地图片上传到 B 站 Web 图片上传接口，借助 B 站 CDN 得到公网外链。
 
-通过环境变量配置（与其它图床一致，可写在 ``data/.env``）：
-- ``BILI_SESSDATA`` / ``BILI_CSRF_TOKEN``：B 站登录 Cookie（SESSDATA 与 bili_jct）
-- ``BILI_BUCKET``：上传桶名（默认 ``openplatform``）
+需在 image_host 配置项里提供 B 站登录 Cookie：
+- ``sessdata`` / ``csrf_token``：B 站登录 Cookie（SESSDATA 与 bili_jct）
+- ``bucket``：上传桶名（默认 ``openplatform``）
 
 上限 20MB。
 """
@@ -10,14 +10,11 @@
 from __future__ import annotations
 
 import mimetypes
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
-
-from ._imagehost_http import http_kwargs
 
 DEFAULT_TIMEOUT = 30.0
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -74,33 +71,16 @@ class BilibiliImageHost:
         self.timeout = timeout
 
     @classmethod
-    def from_env(
-        cls,
-        *,
-        env_file: str | Path | None = None,
-        sessdata: str | None = None,
-        csrf_token: str | None = None,
-        bucket: str | None = None,
-    ) -> BilibiliImageHost:
-        if env_file is not None:
-            from dotenv import load_dotenv
-
-            load_dotenv(Path(env_file))
-
-        resolved_sess = (sessdata or os.getenv("BILI_SESSDATA", "")).strip()
-        resolved_csrf = (csrf_token or os.getenv("BILI_CSRF_TOKEN", "")).strip()
-        if not resolved_sess or not resolved_csrf:
+    def from_config(cls, entry: dict) -> BilibiliImageHost:
+        sessdata = str(entry.get("sessdata", "")).strip()
+        csrf_token = str(entry.get("csrf_token", "")).strip()
+        if not sessdata or not csrf_token:
             raise RuntimeError(
-                "请先设置 BILI_SESSDATA 和 BILI_CSRF_TOKEN（B 站登录 Cookie）"
+                "请先配置 bilibili 图床的 sessdata 和 csrf_token（B 站登录 Cookie）"
             )
-
-        resolved_bucket = (bucket or os.getenv("BILI_BUCKET", DEFAULT_BUCKET)).strip()
+        bucket = str(entry.get("bucket", DEFAULT_BUCKET)).strip() or DEFAULT_BUCKET
         return cls(
-            BilibiliConfig(
-                sessdata=resolved_sess,
-                csrf_token=resolved_csrf,
-                bucket=resolved_bucket or DEFAULT_BUCKET,
-            )
+            BilibiliConfig(sessdata=sessdata, csrf_token=csrf_token, bucket=bucket)
         )
 
     def upload_bytes(self, body: bytes, *, filename: str | None = None) -> str:
@@ -120,7 +100,7 @@ class BilibiliImageHost:
                 "User-Agent": _USER_AGENT,
                 "Cookie": f"SESSDATA={self.config.sessdata}; bili_jct={self.config.csrf_token}",
             },
-            **http_kwargs(self.timeout),
+            timeout=self.timeout,
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Bilibili 上传失败 (HTTP {resp.status_code})")

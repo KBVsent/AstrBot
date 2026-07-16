@@ -15,8 +15,16 @@ class QQOfficialWebhookMessageEvent(QQOfficialMessageEvent):
         platform_meta: PlatformMetadata,
         session_id: str,
         bot: Client,
+        image_host_chain: list[str] | None = None,
     ) -> None:
-        super().__init__(message_str, message_obj, platform_meta, session_id, bot)
+        super().__init__(
+            message_str,
+            message_obj,
+            platform_meta,
+            session_id,
+            bot,
+            image_host_chain=image_host_chain,
+        )
 
     async def ack_interaction(self, code: int = 0) -> None:
         """Webhook 模式下,interaction ack 必须通过 HTTP 响应体返回,

@@ -1,7 +1,17 @@
+"""腾讯云 COS 图床：用密钥直传对象存储，返回预签名下载直链（或公开直链）。
+
+需在 image_host 配置项里提供：
+- ``secret_id`` / ``secret_key``：COS 密钥
+- ``bucket`` / ``region``：桶名与地域
+- ``prefix``：对象键前缀（默认 ``temp``）
+- ``endpoint``：可选自定义/加速域名
+"""
+
+from __future__ import annotations
+
 import hashlib
 import hmac
 import mimetypes
-import os
 import time
 import uuid
 from dataclasses import dataclass
@@ -10,7 +20,6 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
-
 
 DEFAULT_PREFIX = "temp"
 DEFAULT_EXPIRES_SECONDS = 3600
@@ -93,10 +102,7 @@ def build_cos_auth(
         f"{name}={value}" for name, value in sorted(encoded_headers.items())
     )
     format_string = (
-        f"{method.lower()}\n"
-        f"{canonical_path}\n"
-        f"{canonical_params}\n"
-        f"{canonical_headers}\n"
+        f"{method.lower()}\n{canonical_path}\n{canonical_params}\n{canonical_headers}\n"
     )
 
     now = int(time.time())
@@ -132,38 +138,27 @@ class CosNoSdkClient:
         self.config = config
 
     @classmethod
-    def from_env(
-        cls,
-        *,
-        env_file: str | Path | None = None,
-        bucket: str | None = None,
-        region: str | None = None,
-        prefix: str | None = None,
-        endpoint: str | None = None,
-    ) -> "CosNoSdkClient":
-        if env_file is not None:
-            from dotenv import load_dotenv
-
-            load_dotenv(Path(env_file))
-
-        secret_id = os.getenv("COS_SECRET_ID")
-        secret_key = os.getenv("COS_SECRET_KEY")
+    def from_config(cls, entry: dict) -> CosNoSdkClient:
+        secret_id = str(entry.get("secret_id", "")).strip()
+        secret_key = str(entry.get("secret_key", "")).strip()
         if not secret_id or not secret_key:
-            raise RuntimeError("请先设置 COS_SECRET_ID 和 COS_SECRET_KEY")
+            raise RuntimeError("请先配置 cos 图床的 secret_id 和 secret_key")
 
-        resolved_bucket = bucket or os.getenv("COS_BUCKET")
-        resolved_region = region or os.getenv("COS_REGION")
-        if not resolved_bucket or not resolved_region:
-            raise RuntimeError("请先设置 COS_BUCKET 和 COS_REGION，或在调用时传入 bucket 和 region")
+        bucket = str(entry.get("bucket", "")).strip()
+        region = str(entry.get("region", "")).strip()
+        if not bucket or not region:
+            raise RuntimeError("请先配置 cos 图床的 bucket 和 region")
 
         return cls(
             CosConfig(
                 secret_id=secret_id,
                 secret_key=secret_key,
-                bucket=resolved_bucket,
-                region=resolved_region,
-                prefix=prefix or os.getenv("COS_PREFIX", DEFAULT_PREFIX),
-                endpoint=endpoint or os.getenv("COS_ENDPOINT") or os.getenv("COS_ACCELERATE_DOMAIN"),
+                bucket=bucket,
+                region=region,
+                prefix=str(entry.get("prefix") or DEFAULT_PREFIX),
+                endpoint=(str(entry.get("endpoint")).strip() or None)
+                if entry.get("endpoint")
+                else None,
             )
         )
 
@@ -216,7 +211,9 @@ class CosNoSdkClient:
         if not path.is_file():
             raise FileNotFoundError(f"文件不存在: {path}")
 
-        object_key = key or make_object_key(path, self.config.prefix if prefix is None else prefix)
+        object_key = key or make_object_key(
+            path, self.config.prefix if prefix is None else prefix
+        )
         body = path.read_bytes()
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 

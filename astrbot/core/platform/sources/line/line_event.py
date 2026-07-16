@@ -34,9 +34,12 @@ class LineMessageEvent(AstrMessageEvent):
         platform_meta,
         session_id,
         line_api: LineAPIClient,
+        image_host_chain: list[str] | None = None,
     ) -> None:
         super().__init__(message_str, message_obj, platform_meta, session_id)
         self.line_api = line_api
+        # 图床后端 id 有序优先链（对应全局 image_host 的 id）；空则用全部已启用后端。
+        self._image_host_chain = image_host_chain
 
         # LINE 的 reply token 单次有效、仅约 1 分钟内可用、单次最多 5 条消息
         raw = message_obj.raw_message
@@ -51,6 +54,7 @@ class LineMessageEvent(AstrMessageEvent):
     @staticmethod
     async def _component_to_message_object(
         segment: BaseMessageComponent,
+        chain: list[str] | None = None,
     ) -> dict | None:
         if isinstance(segment, Plain):
             text = segment.text.strip()
@@ -66,7 +70,7 @@ class LineMessageEvent(AstrMessageEvent):
 
         if isinstance(segment, Image):
             original_url, preview_url = await LineMessageEvent._resolve_image_urls(
-                segment
+                segment, chain
             )
             if not original_url or not preview_url:
                 return None
@@ -91,7 +95,9 @@ class LineMessageEvent(AstrMessageEvent):
             video_url = await LineMessageEvent._resolve_video_url(segment)
             if not video_url:
                 return None
-            preview_url = await LineMessageEvent._resolve_video_preview_url(segment)
+            preview_url = await LineMessageEvent._resolve_video_preview_url(
+                segment, chain
+            )
             if not preview_url:
                 return None
             return {
@@ -118,12 +124,32 @@ class LineMessageEvent(AstrMessageEvent):
         return None
 
     @staticmethod
-    async def _resolve_image_urls(segment: Image) -> tuple[str, str]:
+    async def _resolve_public_image_url(
+        file_path: str, chain: list[str] | None
+    ) -> str | None:
+        """把本地图片上传到共享图床，得到长期可访问的公网外链；失败返回 None。"""
+        try:
+            from astrbot.core.utils.imagehost import upload_image
+
+            return await upload_image(file_path, chain)
+        except Exception as e:
+            logger.debug("[LINE] imagehost upload failed: %s", e)
+            return None
+
+    @staticmethod
+    async def _resolve_image_urls(
+        segment: Image, chain: list[str] | None = None
+    ) -> tuple[str, str]:
         candidate = (segment.url or segment.file or "").strip()
         if candidate.startswith("https://"):
             return candidate, candidate
         try:
             file_path = await segment.convert_to_file_path()
+            # 优先走图床（外链可重复拉取，original/preview 共用一个 URL 即可）。
+            url = await LineMessageEvent._resolve_public_image_url(file_path, chain)
+            if url:
+                return url, url
+            # 图床不可用时回退到单次 token 文件服务（LINE 分别拉取 original/preview）。
             urls = await LineMessageEvent._register_local_media(
                 file_path, token_count=2
             )
@@ -139,6 +165,7 @@ class LineMessageEvent(AstrMessageEvent):
             return candidate
         try:
             file_path = await segment.convert_to_file_path()
+            # 图床后端仅支持图片；音频必须走文件服务 token。
             return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve record url failed: %s", e)
@@ -162,13 +189,26 @@ class LineMessageEvent(AstrMessageEvent):
             return candidate
         try:
             file_path = await segment.convert_to_file_path()
+            # 图床后端仅支持图片；视频本体必须走文件服务 token。
             return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve video url failed: %s", e)
             return ""
 
     @staticmethod
-    async def _resolve_video_preview_url(segment: Video) -> str:
+    async def _resolve_preview_image_url(
+        image_path: str, chain: list[str] | None
+    ) -> str:
+        """视频封面图（图片）：优先走图床，失败回退单次 token 文件服务。"""
+        url = await LineMessageEvent._resolve_public_image_url(image_path, chain)
+        if url:
+            return url
+        return (await LineMessageEvent._register_local_media(image_path))[0]
+
+    @staticmethod
+    async def _resolve_video_preview_url(
+        segment: Video, chain: list[str] | None = None
+    ) -> str:
         cover_candidate = (segment.cover or "").strip()
         if cover_candidate.startswith("https://"):
             return cover_candidate
@@ -177,7 +217,9 @@ class LineMessageEvent(AstrMessageEvent):
             try:
                 cover_seg = Image(file=cover_candidate)
                 cover_path = await cover_seg.convert_to_file_path()
-                return (await LineMessageEvent._register_local_media(cover_path))[0]
+                return await LineMessageEvent._resolve_preview_image_url(
+                    cover_path, chain
+                )
             except Exception as e:
                 logger.debug("[LINE] resolve video cover failed: %s", e)
 
@@ -206,7 +248,7 @@ class LineMessageEvent(AstrMessageEvent):
 
             cover_seg = Image.fromFileSystem(str(thumb_path))
             cover_path = await cover_seg.convert_to_file_path()
-            return (await LineMessageEvent._register_local_media(cover_path))[0]
+            return await LineMessageEvent._resolve_preview_image_url(cover_path, chain)
         except Exception as e:
             logger.debug("[LINE] generate video preview failed: %s", e)
             return ""
@@ -219,6 +261,7 @@ class LineMessageEvent(AstrMessageEvent):
             file_path = await segment.get_file(allow_return_url=False)
             if not file_path:
                 return ""
+            # 图床后端仅支持图片；任意文件必须走文件服务 token。
             return (await LineMessageEvent._register_local_media(file_path))[0]
         except Exception as e:
             logger.debug("[LINE] resolve file url failed: %s", e)
@@ -273,10 +316,12 @@ class LineMessageEvent(AstrMessageEvent):
         return 0
 
     @classmethod
-    async def build_line_messages(cls, message_chain: MessageChain) -> list[dict]:
+    async def build_line_messages(
+        cls, message_chain: MessageChain, chain: list[str] | None = None
+    ) -> list[dict]:
         messages: list[dict] = []
         for segment in message_chain.chain:
-            obj = await cls._component_to_message_object(segment)
+            obj = await cls._component_to_message_object(segment, chain)
             if obj:
                 messages.append(obj)
 
@@ -291,7 +336,7 @@ class LineMessageEvent(AstrMessageEvent):
         return messages
 
     async def send(self, message: MessageChain) -> None:
-        messages = await self.build_line_messages(message)
+        messages = await self.build_line_messages(message, self._image_host_chain)
         if messages:
             self._enqueue(messages)
         await super().send(message)

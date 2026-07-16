@@ -779,6 +779,10 @@
         "description": "Max Consecutive Failures",
         "type": "int",
         "hint": "Maximum allowed consecutive failures; retries will stop if exceeded."
+      },
+      "image_host_chain": {
+        "description": "Image host chain",
+        "hint": "Ordered list of image hosting instance IDs (matching the ids configured in Settings → Image Hosting). Leave empty to use all enabled backends in the configured order."
       }
     },
     "general": {
@@ -1215,6 +1219,10 @@
       },
       "no_proxy": {
         "description": "Direct Connection Address List"
+      },
+      "image_host": {
+        "description": "Image hosting backends",
+        "hint": "A JSON array. Uploads local images to image hosting services to get long-lived public URLs, shared by platform adapters. Each item is a backend instance: {\"id\", \"type\", \"enable\", ...credentials}. Adapters reference instances by id via their \"image host chain\"; empty means all enabled backends in this order."
       }
     }
   },

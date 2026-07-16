@@ -45,6 +45,10 @@
         "title": "Cache",
         "subtitle": "Automatic cleanup threshold for the temporary directory."
       },
+      "imageHost": {
+        "title": "Image Hosting",
+        "subtitle": "Third-party image hosting backends used by platform adapters to get public image URLs."
+      },
       "t2iRendering": {
         "title": "Text-to-Image",
         "subtitle": "Rendering strategy, endpoint, and custom templates for text-to-image."

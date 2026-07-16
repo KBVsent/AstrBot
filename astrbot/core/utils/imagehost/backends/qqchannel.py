@@ -1,16 +1,15 @@
 """QQ 频道图床：把本地图片上传到一个中转子频道消息，借助 QQ CDN 得到公网外链。
 
-通过环境变量配置（与 COS 一致，可写在 ``data/.env``）：
-- ``QQ_CHANNEL_APPID`` / ``QQ_CHANNEL_SECRET``：QQ 机器人凭证
-- ``QQ_CHANNEL_ID``：用于中转上传的子频道 ID
-- ``QQ_CHANNEL_MAX_IMAGE_BYTES``：单图上限（默认 3MB，超限自动压缩）
+需在 image_host 配置项里提供：
+- ``appid`` / ``secret``：QQ 机器人凭证
+- ``channel_id``：用于中转上传的子频道 ID
+- ``max_image_bytes``：单图上限（默认 3MB，超限自动压缩）
 """
 
 from __future__ import annotations
 
 import hashlib
 import mimetypes
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -102,36 +101,26 @@ class QQChannelImageHost:
         self._token_expire_at: float = 0.0
 
     @classmethod
-    def from_env(
-        cls,
-        *,
-        env_file: str | Path | None = None,
-        appid: str | None = None,
-        secret: str | None = None,
-        channel_id: str | None = None,
-    ) -> QQChannelImageHost:
-        if env_file is not None:
-            from dotenv import load_dotenv
+    def from_config(cls, entry: dict) -> QQChannelImageHost:
+        appid = str(entry.get("appid", "")).strip()
+        secret = str(entry.get("secret", "")).strip()
+        if not appid or not secret:
+            raise RuntimeError("请先配置 qqchannel 图床的 appid 和 secret")
 
-            load_dotenv(Path(env_file))
+        channel_id = str(entry.get("channel_id", "")).strip()
+        if not channel_id:
+            raise RuntimeError(
+                "请先配置 qqchannel 图床的 channel_id（用于中转上传的子频道 ID）"
+            )
 
-        resolved_appid = appid or os.getenv("QQ_CHANNEL_APPID")
-        resolved_secret = secret or os.getenv("QQ_CHANNEL_SECRET")
-        if not resolved_appid or not resolved_secret:
-            raise RuntimeError("请先设置 QQ_CHANNEL_APPID 和 QQ_CHANNEL_SECRET")
-
-        resolved_channel = channel_id or os.getenv("QQ_CHANNEL_ID")
-        if not resolved_channel:
-            raise RuntimeError("请先设置 QQ_CHANNEL_ID（用于中转上传的子频道 ID）")
-
-        max_bytes_env = os.getenv("QQ_CHANNEL_MAX_IMAGE_BYTES")
+        max_bytes = entry.get("max_image_bytes")
         return cls(
             QQChannelConfig(
-                appid=resolved_appid,
-                secret=resolved_secret,
-                channel_id=resolved_channel,
-                max_image_bytes=int(max_bytes_env)
-                if max_bytes_env
+                appid=appid,
+                secret=secret,
+                channel_id=channel_id,
+                max_image_bytes=int(max_bytes)
+                if max_bytes
                 else DEFAULT_MAX_IMAGE_BYTES,
             )
         )

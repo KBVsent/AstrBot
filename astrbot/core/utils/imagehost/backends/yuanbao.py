@@ -1,9 +1,7 @@
 """腾讯元宝图床：用元宝 genUploadInfo 取 COS 临时凭证后直传，返回带签名的直链。
 
-需登录 Cookie（``YUANBAO_COOKIE``，从浏览器 genUploadInfo 请求里复制完整 Cookie 头）。
-上限 20MB。返回的是 6 小时有效期的签名 URL——QQ 在发送时即时下载转存，故足够用。
-
-可选经代理访问，见 :mod:`._imagehost_http`。
+需在 image_host 配置项里提供登录 Cookie（``cookie``，从浏览器 genUploadInfo 请求里复制完整 Cookie 头）。
+上限 20MB。返回的是 6 小时有效期的签名 URL——即时下载转存，故足够用。
 """
 
 from __future__ import annotations
@@ -18,8 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-
-from ._imagehost_http import http_kwargs
 
 DEFAULT_TIMEOUT = 30.0
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -203,23 +199,11 @@ class YuanbaoImageHost:
         self.timeout = timeout
 
     @classmethod
-    def from_env(
-        cls,
-        *,
-        env_file: str | Path | None = None,
-        cookie: str | None = None,
-    ) -> YuanbaoImageHost:
-        import os
-
-        if env_file is not None:
-            from dotenv import load_dotenv
-
-            load_dotenv(Path(env_file))
-
-        resolved = (cookie or os.getenv("YUANBAO_COOKIE", "")).strip()
-        if not resolved:
-            raise RuntimeError("请先设置 YUANBAO_COOKIE（元宝登录 Cookie）")
-        return cls(YuanbaoConfig(cookie=resolved))
+    def from_config(cls, entry: dict) -> YuanbaoImageHost:
+        cookie = str(entry.get("cookie", "")).strip()
+        if not cookie:
+            raise RuntimeError("请先配置 yuanbao 图床的 cookie（元宝登录 Cookie）")
+        return cls(YuanbaoConfig(cookie=cookie))
 
     def _upload_info_headers(self) -> dict[str, str]:
         cookie = self.config.cookie
@@ -263,7 +247,7 @@ class YuanbaoImageHost:
             _GEN_UPLOAD_INFO,
             json={"fileName": image_name, "docFrom": "localDoc", "docOpenId": ""},
             headers=self._upload_info_headers(),
-            **http_kwargs(self.timeout),
+            timeout=self.timeout,
         )
         if info_resp.status_code != 200:
             raise RuntimeError(f"元宝 upload-info 失败 (HTTP {info_resp.status_code})")
@@ -297,7 +281,7 @@ class YuanbaoImageHost:
                 "Host": host,
                 "x-cos-security-token": str(info["encryptToken"]),
             },
-            **http_kwargs(120),
+            timeout=120,
         )
         if cos_resp.status_code >= 300:
             raise RuntimeError(f"元宝 COS 上传失败 (HTTP {cos_resp.status_code})")

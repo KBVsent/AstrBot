@@ -100,7 +100,9 @@ class LinePlatformAdapter(Platform):
         session: MessageSesion,
         message_chain: MessageChain,
     ) -> None:
-        messages = await LineMessageEvent.build_line_messages(message_chain)
+        messages = await LineMessageEvent.build_line_messages(
+            message_chain, self.config.get("image_host_chain") or None
+        )
         if messages:
             await self.line_api.push_message(session.session_id, messages)
         await super().send_by_session(session, message_chain)
@@ -480,6 +482,7 @@ class LinePlatformAdapter(Platform):
             platform_meta=self.meta(),
             session_id=message.session_id,
             line_api=self.line_api,
+            image_host_chain=self.config.get("image_host_chain") or None,
         )
 
     async def handle_msg(self, abm: AstrBotMessage) -> None:
