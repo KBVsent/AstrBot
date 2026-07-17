@@ -109,9 +109,6 @@ class QQOfficialWebhook:
         self.shutdown_event = asyncio.Event()
         self._connection: ConnectionSession | None = None
 
-        # Cache for extra fields extracted from raw webhook payloads, keyed by message id
-        self._extra_data_cache: dict[str, dict] = {}
-
         # Deduplication cache for webhook retry callbacks.
         self._seen_event_ids: dict[str, float] = {}
         self._dedup_ttl: int = 60  # seconds
@@ -163,10 +160,6 @@ class QQOfficialWebhook:
             "signature": signature,
         }
         return response
-
-    def pop_extra_data(self, message_id: str) -> dict:
-        """Pop and return extra fields cached from the raw webhook payload for a given message ID."""
-        return self._extra_data_cache.pop(message_id, {})
 
     async def callback(self, request):
         """内部服务器的回调入口"""
@@ -246,24 +239,10 @@ class QQOfficialWebhook:
                 self._setup_connection()
             connection = cast(ConnectionSession, self._connection)
 
-            # Extract extra fields from raw payload before botpy parses and discards them
-            if data:
-                msg_id = data.get("id")
-                if msg_id:
-                    author = data.get("author") or {}
-                    extra: dict = {}
-                    if union_openid := author.get("union_openid"):
-                        extra["union_openid"] = union_openid
-                    if message_scene := data.get("message_scene"):
-                        extra["message_scene"] = message_scene
-                    if extra:
-                        self._extra_data_cache[msg_id] = extra
             try:
                 func = connection.parser[event]
             except KeyError:
                 logger.error("_parser unknown event %s.", event)
-                if data:
-                    self._extra_data_cache.pop(data.get("id", ""), None)
             else:
                 func(msg)
                 # interaction_create 在 webhook 模式下 ack code 必须放进 HTTP

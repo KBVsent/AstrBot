@@ -211,11 +211,7 @@ class QQOfficialWebhookPlatformAdapter(Platform):
             self.client,
             image_host_chain=self.config.get("image_host_chain") or None,
         )
-        webhook_helper = getattr(self, "webhook_helper", None)
-        if webhook_helper and message.message_id:
-            extra_data = webhook_helper.pop_extra_data(message.message_id)
-            for key, val in extra_data.items():
-                event.set_extra(key, val)
+        QQOfficialPlatformAdapter.attach_author_extras(event, message)
         return event
 
     async def run(self) -> None:

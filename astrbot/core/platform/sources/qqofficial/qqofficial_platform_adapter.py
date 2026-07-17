@@ -28,7 +28,7 @@ from astrbot.api.platform import (
     PlatformMetadata,
 )
 from astrbot.core.message.components import BaseMessageComponent
-from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.core.platform.astr_message_event import AstrMessageEvent, MessageSesion
 from astrbot.core.utils.media_utils import MediaResolver
 
 from ...register import register_platform_adapter
@@ -112,6 +112,17 @@ class PatchedC2CMessage(botpy.message.C2CMessage):
         super().__init__(api, event_id, data)  # type: ignore
         _set_raw_message_fields(self, data)
 
+    class _User:
+        def __init__(self, data: dict[str, Any]) -> None:
+            self.id = data.get("id", None)
+            self.username = data.get("username", None)
+            self.bot = data.get("bot", None)
+            self.user_openid = data.get("user_openid", None)
+            self.union_openid = data.get("union_openid", None)
+
+        def __repr__(self) -> str:
+            return str(self.__dict__)
+
 
 class PatchedGroupMessage(botpy.message.GroupMessage):
     __slots__ = ("raw_data", "message_type", "msg_elements", "message_reference_id")
@@ -133,6 +144,8 @@ class PatchedGroupMessage(botpy.message.GroupMessage):
             self.avatar = data.get("avatar", None)
             self.member_openid = data.get("member_openid", None)
             self.user_openid = data.get("user_openid", None)
+            self.union_openid = data.get("union_openid", None)
+            self.member_role = data.get("member_role", None)
             self.is_you = data.get("is_you", None)
             self.scope = data.get("scope", None)
 
@@ -684,6 +697,14 @@ class QQOfficialPlatformAdapter(Platform):
             support_proactive_message=True,
         )
 
+    @staticmethod
+    def attach_author_extras(event: AstrMessageEvent, message: AstrBotMessage) -> None:
+        """将 QQ 官方 author 自带、botpy 不解析的字段翻译为 event extra"""
+        author = getattr(message.raw_message, "author", None)
+        for key in ("member_role", "union_openid"):
+            if val := getattr(author, key, None):
+                event.set_extra(key, val)
+
     def create_event(self, message: AstrBotMessage) -> QQOfficialMessageEvent:
         """Creates a QQ Official message event.
 
@@ -693,7 +714,7 @@ class QQOfficialPlatformAdapter(Platform):
         Returns:
             Created QQ Official message event.
         """
-        return QQOfficialMessageEvent(
+        event = QQOfficialMessageEvent(
             message.message_str,
             message,
             self.meta(),
@@ -701,6 +722,8 @@ class QQOfficialPlatformAdapter(Platform):
             self.client,
             image_host_chain=self.config.get("image_host_chain") or None,
         )
+        self.attach_author_extras(event, message)
+        return event
 
     @staticmethod
     def _normalize_attachment_url(url: str | None) -> str:
