@@ -539,7 +539,10 @@ async def download_dashboard(
 
     if latest or len(str(version)) != 40:
         ver_name = "latest" if latest else version
-        dashboard_release_url = f"https://astrbot-registry.soulter.top/download/astrbot-dashboard/{ver_name}/dist.zip"
+        if not latest:
+            dashboard_release_url = f"https://github.com/KBVsent/AstrBot/releases/download/webui-{ver_name}/dist.zip"
+        else:
+            dashboard_release_url = f"https://astrbot-registry.soulter.top/download/astrbot-dashboard/{ver_name}/dist.zip"
         logger.info(
             f"Downloading AstrBot WebUI from {dashboard_release_url}",
         )

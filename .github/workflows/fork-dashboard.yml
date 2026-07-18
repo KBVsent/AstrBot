@@ -1,0 +1,64 @@
+name: Fork Dashboard Build
+on:
+  push:
+    paths:
+      - "dashboard/**"
+      - "astrbot/__init__.py"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.repository == 'KBVsent/AstrBot'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6.0.9
+        with:
+          version: 10.28.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24.13.0"
+          cache: "pnpm"
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Read core version
+        id: ver
+        run: |
+          VERSION=$(grep -oP '__version__ = "\K[^"]+' astrbot/__init__.py)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Core version: v$VERSION"
+
+      - name: Install and build
+        working-directory: dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Stamp version and package
+        working-directory: dashboard
+        run: |
+          mkdir -p dist/assets
+          # Must equal core VERSION (semver-compared) so the app treats it as up-to-date.
+          printf 'v%s' "$VERSION" > dist/assets/version
+          zip -r dist.zip dist
+
+      - name: Publish dashboard to Release
+        uses: ncipollo/release-action@v1.21.0
+        with:
+          # Tag matches the download URL: webui-v<core version>
+          tag: webui-v${{ env.VERSION }}
+          name: "Dashboard v${{ env.VERSION }}"
+          body: "Auto-built customized WebUI for core v${{ env.VERSION }} (commit ${{ github.sha }})."
+          artifacts: "dashboard/dist.zip"
+          allowUpdates: true
+          replacesArtifacts: true
+          makeLatest: false
+          token: ${{ secrets.GITHUB_TOKEN }}
