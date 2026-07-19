@@ -60,4 +60,22 @@ class EventBus:
             return
         exc = task.exception()
         if exc is not None:
-            logger.error("pipeline 任务执行异常", exc_info=exc)
+            logger.error("Pipeline task failed.", exc_info=exc)
+
+    def _print_event(self, event: AstrMessageEvent, conf_name: str) -> None:
+        """用于记录事件信息
+
+        Args:
+            event (AstrMessageEvent): 事件对象
+
+        """
+        # 如果有发送者名称: [平台名] 发送者名称/发送者ID: 消息概要
+        if event.get_sender_name():
+            logger.info(
+                f"[{conf_name}] [{event.get_platform_id()}({event.get_platform_name()})] {event.get_sender_name()}/{event.get_sender_id()}: {event.get_message_outline()}",
+            )
+        # 没有发送者名称: [平台名] 发送者ID: 消息概要
+        else:
+            logger.info(
+                f"[{conf_name}] [{event.get_platform_id()}({event.get_platform_name()})] {event.get_sender_id()}: {event.get_message_outline()}",
+            )
