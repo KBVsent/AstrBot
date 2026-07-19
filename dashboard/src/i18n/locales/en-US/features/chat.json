@@ -110,6 +110,20 @@
     "sse": "SSE",
     "websocket": "WebSocket"
   },
+  "simulate": {
+    "title": "Simulated Identity",
+    "hint": "For WebUI testing only: simulate a group chat or a custom sender/group ID (real IDs allowed). Turn off to restore the default private chat.",
+    "enable": "Enable simulation",
+    "on": "On",
+    "groupMode": "Group mode",
+    "groupId": "Group ID",
+    "userId": "User ID (sender)",
+    "userIdHint": "Can be a real user ID, for permission checks or ID-based plugins",
+    "senderName": "Nickname (optional)",
+    "atBot": "@ the bot",
+    "atBotHint": "Group messages need to @ the bot to wake it by default",
+    "reset": "Reset"
+  },
   "config": {
     "title": "Config"
   },

@@ -8,6 +8,7 @@ from typing import Any
 from astrbot import logger
 from astrbot.core import db_helper
 from astrbot.core.db.po import PlatformMessageHistory
+from astrbot.core.message.components import At
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform import (
     AstrBotMessage,
@@ -218,12 +219,44 @@ class WebChatAdapter(Platform):
         message_parts = payload.get("message", [])
         abm.message, message_str_parts = await self._parse_message_parts(message_parts)
 
+        # 应用 WebChat 模拟身份（群组 / 发送者 id，仅用于 WebUI 测试）
+        self._apply_simulated_identity(abm, payload.get("simulate"))
+
         logger.debug(f"WebChatAdapter: {abm.message}")
 
         abm.timestamp = int(time.time())
         abm.message_str = "".join(message_str_parts)
         abm.raw_message = data
         return abm
+
+    def _apply_simulated_identity(self, abm: AstrBotMessage, simulate: Any) -> None:
+        """按前端传入的模拟身份覆盖消息类型 / 发送者 id / 群组 id。
+
+        仅在 webchat 平台内生效，不改变 session_id（保持回包与历史一致）。
+        身份来自浏览器 localStorage，随请求 payload 下发，缺省时保持私聊默认行为。
+        """
+        if not isinstance(simulate, dict):
+            return
+
+        user_id = simulate.get("user_id")
+        if user_id not in (None, ""):
+            user_id = str(user_id)
+            sender_name = simulate.get("sender_name") or user_id
+            abm.sender = MessageMember(user_id, str(sender_name))
+
+        if not simulate.get("is_group"):
+            return
+
+        abm.type = MessageType.GROUP_MESSAGE
+        group_id = simulate.get("group_id")
+        if group_id not in (None, ""):
+            abm.group_id = str(group_id)
+
+        # 群聊默认需要 @机器人 或唤醒前缀才会被唤醒；按需在消息头注入 At
+        if simulate.get("at_bot", True) and not (
+            abm.message and isinstance(abm.message[0], At)
+        ):
+            abm.message.insert(0, At(qq=abm.self_id, name="webchat"))
 
     def run(self) -> Coroutine[Any, Any, None]:
         async def callback(data: tuple) -> None:

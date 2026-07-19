@@ -574,6 +574,7 @@ class LiveChatService:
                         "flags": flags,
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
+                        "simulate": message.get("simulate"),
                     },
                 ),
             )

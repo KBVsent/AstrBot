@@ -1162,6 +1162,7 @@ class ChatService:
                         "message_id": message_id,
                         "llm_checkpoint_id": llm_checkpoint_id,
                         "thread_selected_text": thread_selected_text,
+                        "simulate": post_data.get("simulate"),
                     },
                 ),
             )

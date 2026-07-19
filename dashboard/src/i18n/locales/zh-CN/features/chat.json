@@ -110,6 +110,20 @@
     "sse": "SSE",
     "websocket": "WebSocket"
   },
+  "simulate": {
+    "title": "模拟身份",
+    "hint": "仅用于 WebUI 测试：模拟群聊或自定义发送者/群组 ID，可填真实存在的 ID。关闭后恢复默认私聊。",
+    "enable": "启用模拟身份",
+    "on": "模拟中",
+    "groupMode": "群聊模式",
+    "groupId": "群组 ID",
+    "userId": "用户 ID（发送者）",
+    "userIdHint": "可填真实用户 ID，用于权限判定或按 ID 取数的插件",
+    "senderName": "昵称（可选）",
+    "atBot": "@机器人",
+    "atBotHint": "群聊默认需 @机器人才会被唤醒",
+    "reset": "重置"
+  },
   "config": {
     "title": "配置文件"
   },

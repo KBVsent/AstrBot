@@ -248,6 +248,27 @@
               </v-card>
             </v-menu>
 
+            <v-list-item
+              class="styled-menu-item settings-menu-item"
+              rounded="md"
+              @click="simulateDialogOpen = true"
+            >
+              <template #prepend>
+                <Drama :size="18" class="styled-menu-lucide-icon" />
+              </template>
+              <v-list-item-title>{{
+                tm("simulate.title")
+              }}</v-list-item-title>
+              <template #append>
+                <span
+                  v-if="simulatedIdentity.enabled"
+                  class="settings-menu-value"
+                  >{{ tm("simulate.on") }}</span
+                >
+                <ChevronRight :size="18" class="styled-menu-lucide-icon" />
+              </template>
+            </v-list-item>
+
             <v-menu
               location="end"
               offset="8"
@@ -519,6 +540,84 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
+    <v-dialog v-model="simulateDialogOpen" max-width="460">
+      <v-card>
+        <v-card-title class="text-h3 pa-4 pb-0 pl-6">
+          {{ tm("simulate.title") }}
+        </v-card-title>
+        <v-card-text>
+          <div class="text-medium-emphasis mb-4" style="font-size: 13px">
+            {{ tm("simulate.hint") }}
+          </div>
+          <v-switch
+            v-model="simulatedIdentity.enabled"
+            :label="tm('simulate.enable')"
+            color="primary"
+            density="compact"
+            hide-details
+            class="mb-2"
+          />
+          <template v-if="simulatedIdentity.enabled">
+            <v-switch
+              v-model="simulatedIdentity.is_group"
+              :label="tm('simulate.groupMode')"
+              color="primary"
+              density="compact"
+              hide-details
+              class="mb-3"
+            />
+            <v-text-field
+              v-if="simulatedIdentity.is_group"
+              v-model="simulatedIdentity.group_id"
+              :label="tm('simulate.groupId')"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+              class="mb-3"
+            />
+            <v-text-field
+              v-model="simulatedIdentity.user_id"
+              :label="tm('simulate.userId')"
+              :hint="tm('simulate.userIdHint')"
+              persistent-hint
+              variant="outlined"
+              density="comfortable"
+              class="mb-3"
+            />
+            <v-text-field
+              v-model="simulatedIdentity.sender_name"
+              :label="tm('simulate.senderName')"
+              variant="outlined"
+              density="comfortable"
+              hide-details
+              class="mb-3"
+            />
+            <v-switch
+              v-if="simulatedIdentity.is_group"
+              v-model="simulatedIdentity.at_bot"
+              :label="tm('simulate.atBot')"
+              :hint="tm('simulate.atBotHint')"
+              persistent-hint
+              color="primary"
+              density="compact"
+            />
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-btn variant="text" @click="resetSimulatedIdentity">
+            {{ tm("simulate.reset") }}
+          </v-btn>
+          <v-spacer />
+          <v-btn
+            color="primary"
+            variant="tonal"
+            @click="simulateDialogOpen = false"
+          >
+            {{ t("core.common.close") }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
     <ThreadPanel
       v-model="threadPanelOpen"
       :thread="activeThread"
@@ -554,6 +653,7 @@ import {
   Cable,
   Check,
   ChevronRight,
+  Drama,
   Languages,
   Moon,
   PanelLeft,
@@ -578,6 +678,7 @@ import ReasoningSidebar from "@/components/chat/ReasoningSidebar.vue";
 import ThreadPanel from "@/components/chat/ThreadPanel.vue";
 import RefsSidebar from "@/components/chat/message_list_comps/RefsSidebar.vue";
 import { useSessions, type Session } from "@/composables/useSessions";
+import { useSimulatedIdentity } from "@/composables/useSimulatedIdentity";
 import {
   messageBlocks as buildMessageBlocks,
   useMessages,
@@ -803,6 +904,11 @@ const currentTransportLabel = computed(() =>
 watch(transportMode, (mode) => {
   localStorage.setItem("chat.transportMode", mode);
 });
+
+// WebChat 模拟身份（群聊 / 自定义发送者 id / 群组 id，仅用于测试）
+const simulateDialogOpen = ref(false);
+const { identity: simulatedIdentity, reset: resetSimulatedIdentity } =
+  useSimulatedIdentity();
 
 const isDark = computed(() => customizer.uiTheme === "PurpleThemeDark");
 const canSend = computed(
