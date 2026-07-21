@@ -163,8 +163,12 @@ class AstrMessageEvent(abc.ABC):
                 parts.append("[转发消息]")
             elif isinstance(i, Reply):
                 # 引用回复
-                if i.message_str:
-                    parts.append(f"[引用消息({i.sender_nickname}: {i.message_str})]")
+                detail = i.message_str or self._outline_chain(i.chain).strip()
+                nickname = (i.sender_nickname or "").strip()
+                if detail and nickname:
+                    parts.append(f"[引用消息({nickname}: {detail})]")
+                elif detail:
+                    parts.append(f"[引用消息({detail})]")
                 else:
                     parts.append("[引用消息]")
             else:
