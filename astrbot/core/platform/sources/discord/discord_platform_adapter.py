@@ -281,24 +281,31 @@ class DiscordPlatformAdapter(Platform):
         if abm.message_str:
             message_chain.append(Plain(text=abm.message_str))
         message_chain.extend(at_components)
-        if message.attachments:
-            for attachment in message.attachments:
-                if attachment.content_type and attachment.content_type.startswith(
-                    "image/",
-                ):
-                    message_chain.append(
-                        Image(file=attachment.url, filename=attachment.filename),
-                    )
-                elif attachment.content_type and attachment.content_type.startswith(
-                    "audio/",
-                ):
-                    message_chain.append(
-                        Record(file=attachment.url, url=attachment.url),
-                    )
-                else:
-                    message_chain.append(
-                        File(name=attachment.filename, url=attachment.url),
-                    )
+
+        def _append_attachment(attachment) -> None:
+            if attachment.content_type and attachment.content_type.startswith(
+                "image/",
+            ):
+                message_chain.append(
+                    Image(file=attachment.url, filename=attachment.filename),
+                )
+            elif attachment.content_type and attachment.content_type.startswith(
+                "audio/",
+            ):
+                message_chain.append(
+                    Record(file=attachment.url, url=attachment.url),
+                )
+            else:
+                message_chain.append(
+                    File(name=attachment.filename, url=attachment.url),
+                )
+
+        for attachment in message.attachments:
+            _append_attachment(attachment)
+        # 引用（回复）消息的附件
+        resolved = message.reference.resolved if message.reference else None
+        for attachment in getattr(resolved, "attachments", None) or []:
+            _append_attachment(attachment)
         abm.message = message_chain
         abm.raw_message = message
         abm.self_id = cast(str, self.bot_self_id)
@@ -1297,7 +1304,7 @@ class DiscordPlatformAdapter(Platform):
             return None
 
         # Discord 斜杠指令名称规范
-        if cmd_name != cmd_name.lower() or not re.match(r"^[-_'\\w]{1,32}$", cmd_name):
+        if cmd_name != cmd_name.lower() or not re.match(r"^[-_'\w]{1,32}$", cmd_name):
             logger.debug(f"[Discord] Skipping invalid slash command format: {cmd_name}")
             return None
 
