@@ -17,6 +17,26 @@
           {{ tm('counts', { enabled: enabledCount, total: editModel.length }) }}
         </v-chip>
         <v-spacer></v-spacer>
+        <v-menu>
+          <template v-slot:activator="{ props: menu }">
+            <v-btn v-bind="menu" variant="text" class="mr-1">
+              <v-icon start size="small">mdi-export-variant</v-icon>{{ tm('export') }}
+            </v-btn>
+          </template>
+          <v-list density="compact">
+            <v-list-item @click="exportAll">
+              <template v-slot:prepend><v-icon size="small">mdi-content-copy</v-icon></template>
+              <v-list-item-title>{{ tm('exportAll') }}</v-list-item-title>
+            </v-list-item>
+            <v-list-item :disabled="!selected" @click="exportSelected">
+              <template v-slot:prepend><v-icon size="small">mdi-code-json</v-icon></template>
+              <v-list-item-title>{{ tm('exportSelected') }}</v-list-item-title>
+            </v-list-item>
+          </v-list>
+        </v-menu>
+        <v-btn variant="text" class="mr-2" @click="openImport">
+          <v-icon start size="small">mdi-import</v-icon>{{ tm('import') }}
+        </v-btn>
         <v-btn variant="text" class="mr-2" @click="cancel">{{ tm('cancel') }}</v-btn>
         <v-btn color="primary" variant="flat" :disabled="errors.length > 0" @click="apply">
           <v-icon start>mdi-check</v-icon>{{ tm('apply') }}
@@ -286,6 +306,44 @@
     </v-card>
   </v-dialog>
 
+  <!-- 导入 -->
+  <v-dialog v-model="importDialog" max-width="640">
+    <v-card rounded="lg">
+      <div class="d-flex align-center py-4 px-5">
+        <v-icon color="primary" class="mr-2">mdi-import</v-icon>
+        <span class="text-h5 font-weight-medium">{{ tm('importTitle') }}</span>
+      </div>
+      <v-divider></v-divider>
+      <div class="pa-5">
+        <div class="text-caption text-disabled mb-2">{{ tm('importHint') }}</div>
+        <v-textarea v-model="importText" :placeholder="tm('importPlaceholder')" variant="outlined"
+          rows="12" density="compact" hide-details class="dcr-import-area" spellcheck="false"></v-textarea>
+        <v-alert v-if="importError" type="error" variant="tonal" density="compact" class="mt-3 text-caption">
+          {{ tm('importParseError') }}: {{ importError }}
+        </v-alert>
+        <div v-else-if="importText.trim()" class="text-caption text-success mt-3">
+          {{ tm('importPreview', { count: importPreviewCount }) }}
+        </div>
+        <v-radio-group v-model="importMode" inline density="compact" hide-details class="mt-3">
+          <v-radio value="merge" :label="tm('importMerge')"></v-radio>
+          <v-radio value="replace" :label="tm('importReplace')"></v-radio>
+        </v-radio-group>
+        <div class="text-caption text-disabled">
+          {{ importMode === 'merge' ? tm('importMergeHint') : tm('importReplaceHint') }}
+        </div>
+      </div>
+      <v-divider></v-divider>
+      <v-card-actions class="px-4 py-3">
+        <v-spacer></v-spacer>
+        <v-btn variant="text" @click="importDialog = false">{{ tm('cancel') }}</v-btn>
+        <v-btn color="primary" variant="flat" :disabled="!!importError || !importText.trim()"
+          @click="confirmImport">
+          <v-icon start>mdi-check</v-icon>{{ tm('importConfirm') }}
+        </v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
+
   <v-snackbar v-model="snackbar" :timeout="3000" color="primary" location="top">{{ snackbarText }}</v-snackbar>
 </template>
 
@@ -293,6 +351,7 @@
 import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import { useModuleI18n } from '@/i18n/composables'
+import { copyToClipboard } from '@/utils/clipboard'
 
 const { tm } = useModuleI18n('features/discord-registry')
 
@@ -384,39 +443,45 @@ function entryToModel(key, e) {
   }
 }
 
+// 单条 edit model -> schema entry（整表导出与单条导出共用，保证格式一致）。
+function entryModelToSchemaEntry(c) {
+  const key = String(c.key || '').trim()
+  return {
+    enabled: c.enabled !== false,
+    ephemeral: !!c.ephemeral,
+    slash_name: String(c.slash_name || key).trim(),
+    description: c.description || '',
+    description_localizations: locsArrToObj(c.locs),
+    options: c.options.map((o) => {
+      const type = OPTION_TYPES.includes(o.type) ? o.type : 'string'
+      const out = {
+        name: String(o.name || '').trim(),
+        description: o.description || '',
+        type,
+        description_localizations: locsArrToObj(o.locs),
+        required: !!o.required,
+      }
+      // 仅 string/integer/number 输出 choices；类型不符时丢弃（避免非法 payload）。
+      const chs = (o.choices || []).filter((ch) => String(ch.name || '').trim() !== '')
+      if (isChoiceable(type) && chs.length) {
+        out.choices = chs.map((ch) => {
+          const c = { name: String(ch.name).trim(), value: castChoiceValue(type, ch.value) }
+          const nl = locsArrToObj(ch.locs)
+          if (Object.keys(nl).length) c.name_localizations = nl
+          return c
+        })
+      }
+      return out
+    }),
+  }
+}
+
 function modelToSchema() {
   const out = {}
   for (const c of editModel.value) {
     const key = String(c.key || '').trim()
     if (!key) continue
-    out[key] = {
-      enabled: c.enabled !== false,
-      ephemeral: !!c.ephemeral,
-      slash_name: String(c.slash_name || key).trim(),
-      description: c.description || '',
-      description_localizations: locsArrToObj(c.locs),
-      options: c.options.map((o) => {
-        const type = OPTION_TYPES.includes(o.type) ? o.type : 'string'
-        const out = {
-          name: String(o.name || '').trim(),
-          description: o.description || '',
-          type,
-          description_localizations: locsArrToObj(o.locs),
-          required: !!o.required,
-        }
-        // 仅 string/integer/number 输出 choices；类型不符时丢弃（避免非法 payload）。
-        const chs = (o.choices || []).filter((ch) => String(ch.name || '').trim() !== '')
-        if (isChoiceable(type) && chs.length) {
-          out.choices = chs.map((ch) => {
-            const c = { name: String(ch.name).trim(), value: castChoiceValue(type, ch.value) }
-            const nl = locsArrToObj(ch.locs)
-            if (Object.keys(nl).length) c.name_localizations = nl
-            return c
-          })
-        }
-        return out
-      }),
-    }
+    out[key] = entryModelToSchemaEntry(c)
   }
   return out
 }
@@ -676,6 +741,85 @@ function addAllMissing() {
 function notify(msg) {
   snackbarText.value = msg
   snackbar.value = true
+}
+
+// ===== 导出 / 导入 =====
+async function copyText(text, okMsg) {
+  const ok = await copyToClipboard(text)
+  notify(ok ? okMsg : tm('copyFailed'))
+}
+// 导出反映编辑器当前状态（含未保存改动）；不受 errors 阻拦，允许把半成品交给 AI 修。
+function exportAll() {
+  copyText(JSON.stringify(modelToSchema(), null, 2), tm('exportedAll'))
+}
+function exportSelected() {
+  if (!selected.value) return
+  const key = String(selected.value.key || '').trim() || selected.value.key
+  copyText(
+    JSON.stringify({ [key]: entryModelToSchemaEntry(selected.value) }, null, 2),
+    tm('exportedSelected', { cmd: key }),
+  )
+}
+
+const importDialog = ref(false)
+const importText = ref('')
+const importMode = ref('merge')
+const importError = ref('')
+
+// 解析导入文本：合法时返回 {key: entry} 对象，否则返回 null（并设置 importError）。
+function parseImport() {
+  const raw = importText.value.trim()
+  if (!raw) {
+    importError.value = ''
+    return null
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    importError.value = String(e.message || e)
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    importError.value = tm('importNotObject')
+    return null
+  }
+  importError.value = ''
+  return parsed
+}
+
+const importPreviewCount = computed(() => {
+  const o = parseImport()
+  return o ? Object.keys(o).length : 0
+})
+
+function openImport() {
+  importText.value = ''
+  importError.value = ''
+  importMode.value = 'merge'
+  importDialog.value = true
+}
+
+function confirmImport() {
+  const obj = parseImport()
+  if (!obj) return
+  const entries = Object.entries(obj)
+  if (importMode.value === 'replace') {
+    editModel.value = entries.map(([k, v]) => entryToModel(k, v))
+    selectedId.value = editModel.value.length ? editModel.value[0]._id : null
+  } else {
+    let last = null
+    for (const [k, v] of entries) {
+      const m = entryToModel(k, v)
+      const idx = editModel.value.findIndex((c) => c.key === k)
+      if (idx >= 0) editModel.value.splice(idx, 1, m)
+      else editModel.value.push(m)
+      last = m
+    }
+    if (last) selectedId.value = last._id
+  }
+  importDialog.value = false
+  notify(tm('imported', { count: entries.length }))
 }
 
 function apply() {
