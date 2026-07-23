@@ -54,6 +54,7 @@
       "label": "运行时间",
       "note": "启动于 {startTime}"
     },
+    "previousDayDifference": "较前一天 {difference}",
     "cycleHint": "点击卡片切换口径"
   },
   "messageOverview": {

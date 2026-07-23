@@ -54,6 +54,7 @@
       "label": "Время работы",
       "note": "Запущен в {startTime}"
     },
+    "previousDayDifference": "{difference} к предыдущему дню",
     "cycleHint": "Нажмите карточку, чтобы сменить срез"
   },
   "messageOverview": {

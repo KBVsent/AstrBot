@@ -2110,6 +2110,20 @@ async def test_get_stat(app: FastAPIAppAdapter, authenticated_header: dict):
     assert response.status_code == 200
     data = await response.get_json()
     assert data["status"] == "ok" and "platform" in data["data"]
+    assert data["data"]["previous_message_count"] >= 0
+
+    response = await test_client.get(
+        "/api/stat/active-sessions",
+        headers=authenticated_header,
+    )
+    assert response.status_code == 200
+    data = await response.get_json()
+    assert set(data["data"]["previous"]) == {
+        "distinct_users",
+        "distinct_users_group",
+        "distinct_users_private",
+        "distinct_groups",
+    }
 
 
 @pytest.mark.asyncio

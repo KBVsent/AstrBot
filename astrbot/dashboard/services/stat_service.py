@@ -296,6 +296,13 @@ class StatService:
             message_count = await self.db_helper.get_total_message_count_in_range(
                 naive_start, naive_end, name_key
             )
+            previous_message_count = (
+                await self.db_helper.get_total_message_count_in_range(
+                    naive_start - timedelta(days=1),
+                    naive_start,
+                    name_key,
+                )
+            )
 
             cpu_percent = psutil.cpu_percent(interval=0.5)
             thread_count = threading.active_count()
@@ -320,6 +327,7 @@ class StatService:
                 "available_platforms": self._list_available_platforms(),
                 "platform": platform,
                 "message_count": message_count,
+                "previous_message_count": previous_message_count,
                 "platform_count": len(
                     self.core_lifecycle.platform_manager.get_insts(),
                 ),
@@ -383,6 +391,12 @@ class StatService:
             data = await self.db_helper.get_active_session_stats(
                 date_norm, id_key, limit
             )
+            previous_date = (
+                datetime.strptime(date_norm, "%Y-%m-%d") - timedelta(days=1)
+            ).strftime("%Y-%m-%d")
+            previous_data = await self.db_helper.get_active_session_stats(
+                previous_date, id_key, 0
+            )
         except StatServiceError:
             raise
         except Exception as exc:
@@ -390,6 +404,15 @@ class StatService:
             raise StatServiceError(str(exc)) from exc
         data["date"] = date_norm
         data["platform_id"] = platform_id or ""
+        data["previous"] = {
+            key: previous_data[key]
+            for key in (
+                "distinct_users",
+                "distinct_users_group",
+                "distinct_users_private",
+                "distinct_groups",
+            )
+        }
         return data
 
     @staticmethod

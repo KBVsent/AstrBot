@@ -64,7 +64,20 @@
                 <v-icon size="20">{{ card.icon }}</v-icon>
               </div>
             </div>
-            <div class="card-value">{{ card.value }}</div>
+            <div class="card-value">
+              {{ card.value }}
+              <span
+                v-if="card.difference !== undefined"
+                class="card-difference"
+                :class="differenceClass(card.difference)"
+                :title="t('overviewCards.previousDayDifference', {
+                  difference: formatDifference(card.difference)
+                })"
+              >
+                <v-icon size="15">{{ differenceIcon(card.difference) }}</v-icon>
+                {{ formatNumber(Math.abs(card.difference)) }}
+              </span>
+            </div>
             <div class="card-note">
               <span>{{ card.note }}</span>
               <span
@@ -381,6 +394,7 @@ interface PlatformOption {
 
 interface BaseStatsResponse {
   message_count: number
+  previous_message_count: number
   platform_count: number
   platform: Array<{
     name: string
@@ -418,6 +432,12 @@ interface ActiveSessionsResponse {
   distinct_users_group: number
   distinct_users_private: number
   distinct_groups: number
+  previous: {
+    distinct_users: number
+    distinct_users_group: number
+    distinct_users_private: number
+    distinct_groups: number
+  }
   total_messages: number
   top_users: ActiveUserItem[]
   top_users_group: ActiveUserItem[]
@@ -432,6 +452,7 @@ interface OverviewCard {
   value: string
   note: string
   icon: string
+  difference?: number
   key?: string
   onClick?: () => void
   stepCount?: number
@@ -522,6 +543,22 @@ let refreshTimer: number | null = null
 
 function formatNumber(value: number): string {
   return new Intl.NumberFormat(locale.value).format(value)
+}
+
+function formatDifference(value: number): string {
+  return value > 0 ? `+${formatNumber(value)}` : formatNumber(value)
+}
+
+function differenceClass(value: number): string {
+  if (value > 0) return 'card-difference--increase'
+  if (value < 0) return 'card-difference--decrease'
+  return 'card-difference--unchanged'
+}
+
+function differenceIcon(value: number): string {
+  if (value > 0) return 'mdi-arrow-up'
+  if (value < 0) return 'mdi-arrow-down'
+  return 'mdi-minus'
 }
 
 function formatCompactNumber(value: number): string {
@@ -675,14 +712,20 @@ const overviewCards = computed<OverviewCard[]>(() => [
     label: t('overviewCards.messageCount.label'),
     value: formatNumber(baseStats.value?.message_count ?? 0),
     note: t('overviewCards.messageCount.note'),
-    icon: 'mdi-message-outline'
+    icon: 'mdi-message-outline',
+    difference:
+      (baseStats.value?.message_count ?? 0) -
+      (baseStats.value?.previous_message_count ?? 0)
   },
   distinctUsersCard.value,
   {
     label: t('overviewCards.distinctGroups.label'),
     value: formatNumber(activeSessions.value?.distinct_groups ?? 0),
     note: t('overviewCards.distinctGroups.note'),
-    icon: 'mdi-account-group-outline'
+    icon: 'mdi-account-group-outline',
+    difference:
+      (activeSessions.value?.distinct_groups ?? 0) -
+      (activeSessions.value?.previous?.distinct_groups ?? 0)
   },
   {
     label: t('overviewCards.todayModelCalls.label'),
@@ -806,12 +849,19 @@ const distinctUsersCard = computed(() => {
       : mode === 'private'
         ? activeSessions.value?.distinct_users_private
         : activeSessions.value?.distinct_users
+  const previousValue =
+    mode === 'group'
+      ? activeSessions.value?.previous?.distinct_users_group
+      : mode === 'private'
+        ? activeSessions.value?.previous?.distinct_users_private
+        : activeSessions.value?.previous?.distinct_users
   return {
     key: 'distinctUsers',
     label: t(`overviewCards.distinctUsers${suffix}.label`),
     value: formatNumber(value ?? 0),
     note: t(`overviewCards.distinctUsers${suffix}.note`),
     icon: 'mdi-account-multiple-outline',
+    difference: (value ?? 0) - (previousValue ?? 0),
     onClick: cycleDistinctUserMode,
     stepCount: distinctUserModeOrder.length,
     activeIndex: distinctUserModeOrder.indexOf(mode),
@@ -1204,6 +1254,28 @@ onBeforeUnmount(() => {
   flex-shrink: 0;
 }
 
+.card-difference {
+  display: inline-flex;
+  align-items: center;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.card-difference--increase {
+  color: rgb(var(--v-theme-success));
+}
+
+.card-difference--decrease {
+  color: rgb(var(--v-theme-error));
+}
+
+.card-difference--unchanged {
+  color: var(--stats-subtle);
+}
+
 .card-dot {
   width: 6px;
   height: 6px;
@@ -1301,6 +1373,10 @@ onBeforeUnmount(() => {
 }
 
 .card-value {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
   margin-top: 16px;
   font-size: clamp(28px, 2.2vw, 40px);
   line-height: 1.1;

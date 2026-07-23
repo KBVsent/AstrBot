@@ -557,6 +557,19 @@ class SQLiteDatabase(BaseDatabase):
                 total_messages,
             ) = (await session.execute(overview_stmt)).one()
 
+            if limit <= 0:
+                return {
+                    "distinct_users": int(distinct_users or 0),
+                    "distinct_users_group": int(distinct_users_group or 0),
+                    "distinct_users_private": int(distinct_users_private or 0),
+                    "distinct_groups": int(distinct_groups or 0),
+                    "total_messages": int(total_messages or 0),
+                    "top_users": [],
+                    "top_users_group": [],
+                    "top_users_private": [],
+                    "top_groups": [],
+                }
+
             # 2~4) 三次排行榜查询：全部 / 群聊 / 私聊。
             # 昵称回填由查询自身完成：MAX(user_name) 跨该用户当日所有场景取值，
             # 私聊行天然借到群聊留下的昵称，无需额外的 name_rows 查询。

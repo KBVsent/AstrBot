@@ -54,6 +54,7 @@
       "label": "Uptime",
       "note": "Started at {startTime}"
     },
+    "previousDayDifference": "{difference} vs previous day",
     "cycleHint": "Click card to switch scope"
   },
   "messageOverview": {
