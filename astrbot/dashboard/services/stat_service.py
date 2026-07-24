@@ -304,7 +304,8 @@ class StatService:
                 )
             )
 
-            cpu_percent = psutil.cpu_percent(interval=0.5)
+            process_cpu = await asyncio.to_thread(psutil.Process().cpu_percent, 0.5)
+            cpu_percent = process_cpu / (psutil.cpu_count() or 1)
             thread_count = threading.active_count()
 
             plugins = self.core_lifecycle.star_context.get_all_stars()
