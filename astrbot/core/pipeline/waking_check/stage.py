@@ -253,9 +253,11 @@ class WakingCheckStage(Stage):
                     if isinstance(filter, CommandFilter | CommandGroupFilter):
                         important_message = True
                     await event.send(
-                        MessageEventResult().message(
+                        MessageEventResult()
+                        .message(
                             f"插件 {star_map[handler.handler_module_path].name}: {e}",
-                        ),
+                        )
+                        .use_markdown(False),
                     )
                     event.stop_event()
                     passed = False

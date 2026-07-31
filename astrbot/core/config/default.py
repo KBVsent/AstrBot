@@ -223,9 +223,11 @@ DEFAULT_CONFIG = {
     },
     "provider_ltm_settings": {
         "group_icl_enable": False,
-        "group_message_max_cnt": 300,
+        "group_message_max_cnt": 1000,
         "image_caption": False,
         "image_caption_provider_id": "",
+        "group_message_history_enable": False,
+        "group_message_history_max_cnt": 700,
         "active_reply": {
             "enable": False,
             "method": "possibility_reply",
@@ -1699,7 +1701,7 @@ CONFIG_METADATA_2 = {
                         "enable": False,
                         "api_key": "",
                         "api_base": "https://api.xiaomimimo.com/v1",
-                        "model": "mimo-v2-tts",
+                        "model": "mimo-v2.5-tts",
                         "mimo-tts-voice": "mimo_default",
                         "mimo-tts-format": "wav",
                         "mimo-tts-style-prompt": "",
@@ -1788,6 +1790,7 @@ CONFIG_METADATA_2 = {
                         "enable": False,
                         "api_key": "",
                         "api_base": "https://api.fish.audio/v1",
+                        "model": "s2-pro",
                         "fishaudio-tts-character": "可莉",
                         "fishaudio-tts-reference-id": "",
                         "timeout": "20",
@@ -1945,6 +1948,20 @@ CONFIG_METADATA_2 = {
                         "embedding_api_base": "http://localhost:11434",
                         "embedding_model": "nomic-embed-text",
                         "embedding_dimensions": 768,
+                        "timeout": 60,
+                        "proxy": "",
+                    },
+                    "DashScope Embedding": {
+                        "id": "dashscope_embedding",
+                        "type": "dashscope_embedding",
+                        "provider": "dashscope",
+                        "provider_type": "embedding",
+                        "hint": "provider_group.provider.dashscope_embedding.hint",
+                        "enable": True,
+                        "embedding_api_key": "",
+                        "embedding_api_base": "https://dashscope.aliyuncs.com/api/v1",
+                        "embedding_model": "text-embedding-v4",
+                        "embedding_dimensions": 1024,
                         "timeout": 60,
                         "proxy": "",
                     },
@@ -3052,6 +3069,12 @@ CONFIG_METADATA_2 = {
                     },
                     "image_caption_prompt": {
                         "type": "string",
+                    },
+                    "group_message_history_enable": {
+                        "type": "bool",
+                    },
+                    "group_message_history_max_cnt": {
+                        "type": "int",
                     },
                     "active_reply": {
                         "type": "object",
@@ -4279,29 +4302,48 @@ CONFIG_METADATA_3 = {
                 },
             },
             "ltm": {
-                "description": "群聊上下文感知（原聊天记忆增强）",
+                "description": "群聊上下文感知",
                 "type": "object",
                 "items": {
                     "provider_ltm_settings.group_icl_enable": {
-                        "description": "启用群聊上下文感知",
+                        "description": "群聊消息记录注入上下文",
                         "type": "bool",
                     },
                     "provider_ltm_settings.group_message_max_cnt": {
-                        "description": "最大消息数量",
+                        "description": "注入上下文最大消息数量",
                         "type": "int",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                        },
                     },
                     "provider_ltm_settings.image_caption": {
                         "description": "自动理解图片",
                         "type": "bool",
                         "hint": "需要设置群聊图片转述模型。",
+                        "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
+                        },
                     },
                     "provider_ltm_settings.image_caption_provider_id": {
                         "description": "群聊图片转述模型",
                         "type": "string",
                         "_special": "select_provider",
-                        "hint": "用于群聊上下文感知的图片理解，与默认图片转述模型分开配置。",
+                        "hint": "用于群聊记录注入上下文的图片理解，与默认图片转述模型分开配置。",
                         "condition": {
+                            "provider_ltm_settings.group_icl_enable": True,
                             "provider_ltm_settings.image_caption": True,
+                        },
+                    },
+                    "provider_ltm_settings.group_message_history_enable": {
+                        "description": "持久化群聊消息记录",
+                        "type": "bool",
+                        "hint": "启用后保存群消息，并向模型提供当前群聊历史查询工具。暂时不支持媒体消息记录，媒体消息将保存为 [Image] 等占位文本。",
+                    },
+                    "provider_ltm_settings.group_message_history_max_cnt": {
+                        "description": "持久化最大消息数量",
+                        "type": "int",
+                        "condition": {
+                            "provider_ltm_settings.group_message_history_enable": True,
                         },
                     },
                     "provider_ltm_settings.active_reply.enable": {
@@ -4529,4 +4571,5 @@ DEFAULT_VALUE_MAP = {
     "file": [],
     "object": {},
     "template_list": [],
+    "dict": {},
 }
