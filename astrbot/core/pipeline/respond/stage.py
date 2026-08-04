@@ -14,6 +14,11 @@ from astrbot.core.platform.sources.discord.components import (
     DiscordSelect,
     DiscordView,
 )
+from astrbot.core.platform.sources.line.components import (
+    LineFlex,
+    LineQuickReply,
+    LineRawMessage,
+)
 from astrbot.core.platform.sources.qqofficial.components import QQCButton, QQCKeyboard
 from astrbot.core.star.star_handler import EventType
 from astrbot.core.utils.path_util import path_Mapping
@@ -59,11 +64,19 @@ class RespondStage(Stage):
         QQCKeyboard: lambda comp: bool(comp.rows),
         # Discord 平台组件（Embed / View / 按钮 / Select）
         DiscordEmbed: lambda comp: bool(
-            comp.title or comp.description or comp.fields or comp.image or comp.thumbnail
+            comp.title
+            or comp.description
+            or comp.fields
+            or comp.image
+            or comp.thumbnail
         ),
         DiscordView: lambda comp: bool(comp.components),
         DiscordButton: lambda comp: bool(comp.label or comp.custom_id or comp.url),
         DiscordSelect: lambda comp: bool(comp.custom_id),
+        # LINE 平台组件（Flex / 原始对象直通 / Quick Reply）
+        LineFlex: lambda comp: bool(comp.contents),
+        LineRawMessage: lambda comp: bool(comp.message),
+        LineQuickReply: lambda comp: bool(comp.items),
     }
 
     async def initialize(self, ctx: PipelineContext) -> None:
