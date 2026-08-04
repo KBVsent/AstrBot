@@ -104,7 +104,9 @@ async def test_http_image_without_suffix_uses_detected_image_suffix(
     image_buffer = BytesIO()
     PILImage.new("RGBA", (1, 1), (255, 0, 0, 128)).save(image_buffer, format="PNG")
 
-    async def fake_download_file(_url: str, target_path: str) -> None:
+    async def fake_download_file(
+        _url: str, target_path: str, *, max_bytes: int | None = None
+    ) -> None:
         Path(target_path).write_bytes(image_buffer.getvalue())
 
     monkeypatch.setattr(media_utils, "download_file", fake_download_file)
@@ -425,7 +427,9 @@ async def test_media_resolver_cleans_http_target_when_download_fails(
 ):
     monkeypatch.setattr(media_utils, "get_astrbot_temp_path", lambda: str(tmp_path))
 
-    async def fail_download(url: str, target_path: str) -> None:
+    async def fail_download(
+        url: str, target_path: str, *, max_bytes: int | None = None
+    ) -> None:
         Path(target_path).write_bytes(b"partial")
         raise RuntimeError("download failed")
 
@@ -643,6 +647,44 @@ async def test_file_token_service_accepts_standard_file_uri(tmp_path):
     assert await service.handle_file(token) == str(file_path)
 
 
+@pytest.mark.asyncio
+async def test_file_token_defaults_to_single_use(tmp_path):
+    """默认语义必须保持一次性 —— 既有调用方（如插件 logo、图片回调）依赖它。"""
+    file_path = tmp_path / "a.txt"
+    file_path.write_text("x", encoding="utf-8")
+    service = FileTokenService()
+
+    token = await service.register_file(str(file_path))
+    assert await service.handle_file(token) == str(file_path)
+    with pytest.raises(KeyError):
+        await service.handle_file(token)
+
+
+@pytest.mark.asyncio
+async def test_reusable_file_token_survives_repeated_reads(tmp_path):
+    """LINE 会从公网主动拉取，可能重试、也可能分别拉 original 与 preview。"""
+    file_path = tmp_path / "a.jpg"
+    file_path.write_bytes(b"\xff\xd8\xff\xd9")
+    service = FileTokenService()
+
+    token = await service.register_file(str(file_path), timeout=3600, reusable=True)
+    for _ in range(3):
+        assert await service.handle_file(token) == str(file_path)
+    assert await service.check_token_expired(token) is False
+
+
+@pytest.mark.asyncio
+async def test_reusable_file_token_still_expires(tmp_path):
+    file_path = tmp_path / "a.jpg"
+    file_path.write_bytes(b"\xff\xd8\xff\xd9")
+    service = FileTokenService()
+
+    token = await service.register_file(str(file_path), timeout=-1, reusable=True)
+    assert await service.check_token_expired(token) is True
+    with pytest.raises(KeyError):
+        await service.handle_file(token)
+
+
 def test_path_mapping_accepts_standard_and_legacy_file_uri(tmp_path):
     source_root = tmp_path / "source"
     target_root = tmp_path / "target"
@@ -727,7 +769,7 @@ def _make_wav(path, rate, channels=1, secs=0.2, freq=440):
 
 
 class _FakePysilk:
-    """Stand-in for the ``pysilk`` module that records encode() calls."""
+    """Stand-in for the pysilk module that records encode() calls."""
 
     def __init__(self):
         self.calls = []
@@ -786,3 +828,63 @@ async def test_wav_to_tencent_silk_skips_resample_for_supported_rate(
 
     assert len(fake.calls) == 1
     assert fake.calls[0]["sample_rate"] == 24000
+
+
+class _FakeStreamContent:
+    """最小 aiohttp 响应体替身，记录实际被读取的块数。"""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+        self.read_chunks = 0
+
+    async def iter_chunked(self, _size: int):
+        for chunk in self._chunks:
+            self.read_chunks += 1
+            yield chunk
+
+    async def read(self, size: int = -1):  # noqa: ARG002
+        if not self._chunks:
+            return b""
+        self.read_chunks += 1
+        return self._chunks.pop(0)
+
+
+class _FakeResponse:
+    def __init__(self, chunks: list[bytes], *, declared: int | None = None) -> None:
+        self.headers = {} if declared is None else {"content-length": str(declared)}
+        self.content = _FakeStreamContent(chunks)
+
+
+@pytest.mark.asyncio
+async def test_download_aborts_on_declared_length_over_limit(tmp_path):
+    """声明长度超限时连 body 都不读。"""
+    from astrbot.core.utils.io import (
+        MediaTooLargeError,
+        _download_response_to_file,
+    )
+
+    resp = _FakeResponse([b"x" * 100], declared=5000)
+    target = tmp_path / "out.bin"
+    with open(target, "wb") as f, pytest.raises(MediaTooLargeError):
+        await _download_response_to_file(
+            resp, f, "https://e/x", False, None, max_bytes=1000
+        )
+    assert resp.content.read_chunks == 0
+
+
+@pytest.mark.asyncio
+async def test_download_aborts_without_content_length(tmp_path):
+    """缺 Content-Length 时也必须在累计字节超限处停下，不能读完整个响应。"""
+    from astrbot.core.utils.io import (
+        MediaTooLargeError,
+        _download_response_to_file,
+    )
+
+    resp = _FakeResponse([b"y" * 400] * 10)
+    target = tmp_path / "out.bin"
+    with open(target, "wb") as f, pytest.raises(MediaTooLargeError):
+        await _download_response_to_file(
+            resp, f, "https://e/x", False, None, max_bytes=1000
+        )
+    assert resp.content.read_chunks == 3  # 1200 > 1000 时即中止
+    assert target.stat().st_size <= 1000

@@ -61,7 +61,12 @@ async def test_line_audio_component_uses_media_resolver_for_external_url(monkeyp
     assert FakeMediaResolver.calls == [
         (
             "https://example.test/voice.m4a",
-            {"media_type": "audio", "default_suffix": ".wav"},
+            {
+                "media_type": "audio",
+                "default_suffix": ".wav",
+                # 入站是最大的敞口（由用户触发），外链音频同样受字节上限约束。
+                "max_bytes": 20 * 1024 * 1024,
+            },
             {"target_format": "wav"},
         )
     ]
