@@ -6,6 +6,7 @@ from pathlib import Path
 
 from astrbot.core import logger
 from astrbot.core.config.default import VERSION
+from astrbot.core.fork_dashboard_source import fork_dashboard_url
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path, get_astrbot_path
 from astrbot.core.utils.io import download_file, ensure_dir
 from astrbot.core.utils.version_comparator import VersionComparator
@@ -236,7 +237,7 @@ async def _download_package(
     ensure_dir(zip_path.parent)
 
     if len(version) != 40:
-        hosted_url = (
+        hosted_url = fork_dashboard_url(version) or (
             "https://astrbot-registry.soulter.top/download/"
             f"astrbot-dashboard/{version}/dist.zip"
         )
