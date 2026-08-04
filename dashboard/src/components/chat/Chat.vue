@@ -384,6 +384,7 @@
             :reply-to="chatInputReplyTarget"
             :send-shortcut="sendShortcut"
             :show-provider-selector="false"
+            :placeholder="tm('input.projectPlaceholder')"
             @send="sendCurrentMessage"
             @stop="stopCurrentSession"
             @toggle-streaming="toggleStreaming"
@@ -449,7 +450,7 @@
           </div>
         </section>
 
-        <section class="composer-shell">
+        <section ref="composerShell" class="composer-shell">
           <ChatInput
             ref="inputRef"
             v-model:prompt="draft"
@@ -468,6 +469,9 @@
             :reply-to="chatInputReplyTarget"
             :send-shortcut="sendShortcut"
             :show-provider-selector="false"
+            :placeholder="
+              activeProject ? tm('input.projectPlaceholder') : undefined
+            "
             @send="sendCurrentMessage"
             @stop="stopCurrentSession"
             @toggle-streaming="toggleStreaming"
@@ -795,6 +799,7 @@ const tokenProviderConfigs = ref<TokenProviderConfig[]>([]);
 const tokenModelMetadata = ref<Record<string, ProviderModelMetadata>>({});
 const selectedTokenProviderId = ref("");
 const messagesContainer = ref<HTMLElement | null>(null);
+const composerShell = ref<HTMLElement | null>(null);
 const inputRef = ref<InstanceType<typeof ChatInput> | null>(null);
 const shouldStickToBottom = ref(true);
 const replyTarget = ref<ChatRecord | null>(null);
@@ -823,6 +828,7 @@ const threadSelection = reactive<{
 });
 const enableStreaming = ref(true);
 const sendShortcut = ref<"enter" | "shift_enter">("enter");
+let composerResizeObserver: ResizeObserver | null = null;
 const {
   isRecording,
   startRecording: startRecorder,
@@ -1070,6 +1076,19 @@ watch(
 );
 
 onMounted(async () => {
+  if (typeof ResizeObserver !== "undefined") {
+    composerResizeObserver = new ResizeObserver(([entry]) => {
+      const container = messagesContainer.value;
+      if (!entry || !container) return;
+      const height = Math.ceil(entry.target.getBoundingClientRect().height);
+      container.style.setProperty("--chat-composer-height", `${height}px`);
+      if (shouldStickToBottom.value) scrollToBottom();
+    });
+    if (composerShell.value) {
+      composerResizeObserver.observe(composerShell.value);
+    }
+  }
+
   loadingSessions.value = true;
   try {
     await Promise.all([getSessions(), getProjects(), loadTokenProviders()]);
@@ -1085,8 +1104,15 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  composerResizeObserver?.disconnect();
   chatHeader.CLEAR_CONTEXT();
   cleanupMediaCache();
+});
+
+watch(composerShell, (element, previousElement) => {
+  if (!composerResizeObserver) return;
+  if (previousElement) composerResizeObserver.unobserve(previousElement);
+  if (element) composerResizeObserver.observe(element);
 });
 
 watch(
@@ -1736,7 +1762,7 @@ function removeThreadFromMessages(threadId: string) {
   }
 }
 
-async function handleFilesSelected(files: FileList) {
+async function handleFilesSelected(files: FileList | File[]) {
   const selectedFiles = Array.from(files || []);
   for (const file of selectedFiles) {
     if (file.type.startsWith("image/")) {
@@ -2295,8 +2321,8 @@ function toggleTheme() {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 24px 0 116px;
-  scroll-padding-bottom: 116px;
+  padding: 24px 0 calc(var(--chat-composer-height, 82px) + 34px);
+  scroll-padding-bottom: calc(var(--chat-composer-height, 82px) + 34px);
 }
 
 .conversation-stack.is-empty .messages-panel {
@@ -2438,8 +2464,8 @@ kbd {
   }
 
   .messages-panel {
-    padding: 18px 0 92px;
-    scroll-padding-bottom: 92px;
+    padding: 18px 0 calc(var(--chat-composer-height, 72px) + 20px);
+    scroll-padding-bottom: calc(var(--chat-composer-height, 72px) + 20px);
   }
 
   .conversation-stack.is-empty .messages-panel {
