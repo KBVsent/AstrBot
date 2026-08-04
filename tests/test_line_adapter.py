@@ -512,6 +512,47 @@ async def test_external_image_download_failure_skips_component(monkeypatch):
     assert batch.messages == []
 
 
+# --------------------------------------------------------------- 出站 mention
+
+
+@pytest.mark.asyncio
+async def test_outbound_mention_uses_textv2_in_group():
+    """群聊 / 多人聊天：mention 用 textV2 + substitution 占位符表达。"""
+    batch = await build_line_batch(
+        MessageChain(chain=[At(qq="U9", name="bob"), Plain(" 早")]),
+        allow_mentions=True,
+    )
+    assert batch.messages == [
+        {
+            "type": "textV2",
+            "text": "{m0} 早",
+            "substitution": {
+                "m0": {"type": "mention", "mentionee": {"type": "user", "userId": "U9"}}
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_outbound_mention_degrades_to_plain_text_in_direct_chat():
+    """1:1 里 LINE 不支持 mention，带 mentionee 的对象会让整批 400，必须降级。"""
+    batch = await build_line_batch(
+        MessageChain(chain=[At(qq="U9", name="bob"), Plain(" 早")]),
+        allow_mentions=False,
+    )
+    assert batch.messages == [{"type": "text", "text": "@bob 早"}]
+
+
+@pytest.mark.asyncio
+async def test_outbound_at_all_degrades_to_plain_text_in_direct_chat():
+    """@全体在 1:1 同样非法；没有昵称可用时只留正文，绝不放 mentionee 进批次。"""
+    batch = await build_line_batch(
+        MessageChain(chain=[AtAll(), Plain("通知")]),
+        allow_mentions=False,
+    )
+    assert batch.messages == [{"type": "text", "text": "通知"}]
+
+
 # --------------------------------------------------------------- 直通与批次
 
 

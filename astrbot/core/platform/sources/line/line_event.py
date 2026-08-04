@@ -70,12 +70,16 @@ class LineOutboundBatch:
 async def build_line_batch(
     message_chain: MessageChain,
     image_host_chain: list[str] | None = None,
+    *,
+    allow_mentions: bool = False,
 ) -> LineOutboundBatch:
     """把 AstrBot 消息链转换成 LINE 消息对象与控制信息。
 
     Args:
         message_chain: 待发送的消息链。
         image_host_chain: 图床后端 id 优先链。
+        allow_mentions: 目标是否为群聊 / 多人聊天。LINE 只在这两种目标上支持原生
+            mention，1:1 里带 mentionee 的对象会让整批消息 400，因此默认关闭。
 
     Returns:
         转换结果；无法产出合法对象的组件已被跳过（各自记 warning）。
@@ -86,7 +90,7 @@ async def build_line_batch(
     def flush_text_run() -> None:
         if not text_run:
             return
-        batch.messages.extend(_text_run_to_messages(text_run))
+        batch.messages.extend(_text_run_to_messages(text_run, allow_mentions))
         text_run.clear()
 
     for segment in message_chain.chain:
@@ -124,7 +128,9 @@ async def build_line_batch(
     return batch
 
 
-def _text_run_to_messages(run: list[BaseMessageComponent]) -> list[dict[str, Any]]:
+def _text_run_to_messages(
+    run: list[BaseMessageComponent], allow_mentions: bool
+) -> list[dict[str, Any]]:
     """把一段连续的 Plain / At 转成文本消息对象。
 
     切法：一个 Plain 一条消息（保持既有的气泡表现），紧随其后的正文与 At 合并成同一条
@@ -135,19 +141,21 @@ def _text_run_to_messages(run: list[BaseMessageComponent]) -> list[dict[str, Any
     for comp in run:
         # 一个 chunk 里最多一个 Plain：正文出现后即封口，At 归入下一条。
         if any(isinstance(c, Plain) for c in chunk):
-            message = _build_text_message(chunk)
+            message = _build_text_message(chunk, allow_mentions)
             if message:
                 messages.append(message)
             chunk = []
         chunk.append(comp)
     if chunk:
-        message = _build_text_message(chunk)
+        message = _build_text_message(chunk, allow_mentions)
         if message:
             messages.append(message)
     return messages
 
 
-def _build_text_message(chunk: list[BaseMessageComponent]) -> dict[str, Any] | None:
+def _build_text_message(
+    chunk: list[BaseMessageComponent], allow_mentions: bool
+) -> dict[str, Any] | None:
     """把一段（At* + 最多一个 Plain）转成 text 或带 mention 的 textV2。"""
     if not any(isinstance(comp, At) for comp in chunk):
         text = truncate_utf16(
@@ -155,19 +163,24 @@ def _build_text_message(chunk: list[BaseMessageComponent]) -> dict[str, Any] | N
             LINE_TEXT_MAX_UTF16,
         )
         return {"type": "text", "text": text} if text else None
-    return _build_mention_message(chunk)
+    return _build_mention_message(chunk, allow_mentions)
 
 
-def _build_mention_message(run: list[BaseMessageComponent]) -> dict[str, Any] | None:
+def _build_mention_message(
+    run: list[BaseMessageComponent], allow_mentions: bool
+) -> dict[str, Any] | None:
     """把含 At 的文本段转成带原生 mention 的 textV2。
 
     textV2 用 {占位符} + substitution 表达 mention，不需要偏移量 ——
     这样 mention 之前含 emoji 时也不会错位（按码点算偏移正是旧实现的 bug）。
-    正文里出现 { / } 时无法可靠区分占位符与字面量，此时降级为
-    @昵称 的纯文本消息。
+
+    两种情况必须降级为 @昵称 的纯文本：目标不是群聊 / 多人聊天（LINE 只在这两种目标上
+    支持 mention，1:1 里带 mentionee 会让整批 400），以及正文里出现 { / }
+    导致无法可靠区分占位符与字面量。
     """
     plain_texts = [comp.text for comp in run if isinstance(comp, Plain)]
     braces_in_text = any("{" in text or "}" in text for text in plain_texts)
+    degrade = braces_in_text or not allow_mentions
 
     parts: list[str] = []
     substitution: dict[str, Any] = {}
@@ -177,7 +190,7 @@ def _build_mention_message(run: list[BaseMessageComponent]) -> dict[str, Any] | 
             continue
         target = str(getattr(comp, "qq", "") or "").strip()
         name = str(getattr(comp, "name", "") or "").strip()
-        if braces_in_text or not target:
+        if degrade or not target:
             parts.append(f"@{name}" if name else "")
             continue
         mentionee: dict[str, Any] = (
@@ -604,7 +617,12 @@ class LineMessageEvent(AstrMessageEvent):
     # ------------------------------------------------------------ 发送
 
     async def send(self, message: MessageChain) -> None:
-        batch = await build_line_batch(message, self._image_host_chain)
+        batch = await build_line_batch(
+            message,
+            self._image_host_chain,
+            # 原生 mention 仅群聊 / 多人聊天可用；1:1 里降级成 @昵称 纯文本。
+            allow_mentions=self.message_obj.type != MessageType.FRIEND_MESSAGE,
+        )
         self._accumulate(batch)
         await super().send(message)
 

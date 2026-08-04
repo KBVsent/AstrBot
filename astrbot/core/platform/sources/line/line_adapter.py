@@ -686,7 +686,9 @@ class LinePlatformAdapter(Platform):
     ) -> None:
         """插件显式调用的主动消息接口 —— 唯一允许 push 的路径。"""
         batch = await build_line_batch(
-            message_chain, self.config.get("image_host_chain") or None
+            message_chain,
+            self.config.get("image_host_chain") or None,
+            allow_mentions=session.message_type == MessageType.GROUP_MESSAGE,
         )
         messages = finalize_line_messages(
             batch, quote_store=self._quote_store, chat_id=session.session_id
