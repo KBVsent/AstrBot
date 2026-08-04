@@ -119,10 +119,11 @@ class WakingCheckStage(Stage):
         # inbound_message_log 属于进程级设置，固定读默认配置档（与 log_level 一致），
         # 避免消息按会话路由到独立 abconf 档时读到各档的旧默认值而漏配。
         log_mode = default_astrbot_config.get("inbound_message_log", "wake_only")
+        # category 供 WebUI 日志页的「排除用户对话」开关过滤，两个分支都要带。
         if important or log_mode == "all":
-            logger.info(message)
+            logger.info(message, extra={"category": "user_chat"})
         else:
-            logger.debug(message)
+            logger.debug(message, extra={"category": "user_chat"})
 
     async def process(
         self,
