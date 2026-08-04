@@ -630,6 +630,94 @@ async def test_send_typing_only_in_direct_chat():
 
 
 @pytest.mark.asyncio
+async def test_send_typing_uses_configured_seconds(monkeypatch):
+    """时长可由 platform_specific.line.pre_ack_loading.seconds 覆盖；非法值退回默认。"""
+    import astrbot.core.platform.sources.line.line_event as line_event
+
+    adapter = make_adapter()
+    calls: list[tuple] = []
+
+    async def fake_loading(chat_id: str, seconds: int) -> bool:
+        calls.append((chat_id, seconds))
+        return True
+
+    adapter.line_api.show_loading_animation = fake_loading  # type: ignore[method-assign]
+    direct = await adapter.convert_message(text_event("e1"))
+    assert direct is not None
+
+    def set_conf(value):
+        monkeypatch.setitem(
+            line_event.astrbot_config,
+            "platform_specific",
+            {"line": {"pre_ack_loading": {"enable": True, "seconds": value}}},
+        )
+
+    set_conf(60)
+    await adapter.create_event(direct).send_typing()
+    # 规整（5~60、5 的倍数）由 show_loading_animation 负责，这里原样透传。
+    set_conf(0)
+    await adapter.create_event(direct).send_typing()
+    set_conf("abc")
+    await adapter.create_event(direct).send_typing()
+    assert calls == [("U1", 60), ("U1", 20), ("U1", 20)]
+
+
+@pytest.mark.asyncio
+async def test_preprocess_stage_pre_ack_loading_is_opt_in():
+    """预回应加载动画默认关闭；开启后仅对 line 且明确唤醒的事件触发。"""
+    from astrbot.core.pipeline.preprocess_stage.stage import PreProcessStage
+
+    class FakeEvent:
+        def __init__(self, platform: str, woken: bool) -> None:
+            self.platform = platform
+            self.is_at_or_wake_command = woken
+            self.typing = 0
+
+        def get_platform_name(self) -> str:
+            return self.platform
+
+        async def send_typing(self) -> None:
+            self.typing += 1
+
+        async def react(self, _emoji) -> None:
+            pass
+
+        def get_messages(self) -> list:
+            return []
+
+    async def run(config: dict, event) -> None:
+        stage = PreProcessStage()
+        # 只装本用例会走到的依赖：STT 关闭后 plugin_manager / ctx 都不会被触碰。
+        stage.config = config  # type: ignore[attr-defined]
+        stage.platform_settings = {}
+        stage.stt_settings = {}
+        result = await stage.process(event)
+        if result is not None:
+            async for _ in result:
+                pass
+
+    enabled = {"platform_specific": {"line": {"pre_ack_loading": {"enable": True}}}}
+    disabled = {"platform_specific": {"line": {"pre_ack_loading": {"enable": False}}}}
+
+    woken = FakeEvent("line", True)
+    await run(enabled, woken)
+    assert woken.typing == 1
+
+    not_woken = FakeEvent("line", False)
+    await run(enabled, not_woken)
+    assert not_woken.typing == 0
+
+    off = FakeEvent("line", True)
+    await run(disabled, off)
+    assert off.typing == 0
+
+    # 其它平台不受这个开关影响（WebChat 把 send_typing 用作 LLM run 信号）。
+    other = FakeEvent("webchat", True)
+    await run(enabled, other)
+    assert other.typing == 0
+
+
+@pytest.mark.asyncio
 async def test_get_client_returns_line_api():
     adapter = make_adapter()
     assert adapter.get_client() is adapter.line_api

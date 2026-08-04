@@ -948,6 +948,18 @@
               "hint": "Enter Unicode emoji symbols, e.g., 👍, 🤔, ⏳"
             }
           }
+        },
+        "line": {
+          "pre_ack_loading": {
+            "enable": {
+              "description": "[LINE] Enable Pre-acknowledgment Loading Animation",
+              "hint": "Only works in 1:1 chats (LINE does not support showing it in group chats)"
+            },
+            "seconds": {
+              "description": "Loading Animation Duration (seconds)",
+              "hint": "5-60 and a multiple of 5; out-of-range values are normalized. LINE has no API to end the animation early - it disappears on timeout or when a message arrives"
+            }
+          }
         }
       }
     }

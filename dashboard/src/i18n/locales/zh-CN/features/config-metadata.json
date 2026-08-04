@@ -950,6 +950,18 @@
               "hint": "填写 Unicode 表情符号，例如：👍、🤔、⏳"
             }
           }
+        },
+        "line": {
+          "pre_ack_loading": {
+            "enable": {
+              "description": "[LINE] 启用预回应加载动画",
+              "hint": "仅 1:1 聊天有效（LINE 不支持在群聊显示）"
+            },
+            "seconds": {
+              "description": "加载动画时长（秒）",
+              "hint": "5~60 且为 5 的倍数，超出会被规整。LINE 没有提前结束动画的接口，它到时自动消失或被回复顶掉"
+            }
+          }
         }
       }
     }

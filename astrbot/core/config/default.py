@@ -290,6 +290,9 @@ DEFAULT_CONFIG = {
         "discord": {
             "pre_ack_emoji": {"enable": False, "emojis": ["🤔"]},
         },
+        "line": {
+            "pre_ack_loading": {"enable": False, "seconds": 20},
+        },
     },
     "wake_prefix": ["/"],
     "log_level": "INFO",
@@ -4233,6 +4236,19 @@ CONFIG_METADATA_3 = {
                         "hint": "填写 Unicode 表情符号，例如：👍、🤔、⏳",
                         "condition": {
                             "platform_specific.discord.pre_ack_emoji.enable": True,
+                        },
+                    },
+                    "platform_specific.line.pre_ack_loading.enable": {
+                        "description": "[LINE] 启用预回应加载动画",
+                        "type": "bool",
+                        "hint": "仅 1:1 聊天有效（LINE 不支持在群聊显示）",
+                    },
+                    "platform_specific.line.pre_ack_loading.seconds": {
+                        "description": "加载动画时长（秒）",
+                        "type": "int",
+                        "hint": "5~60 且为 5 的倍数，超出会被规整。LINE 没有提前结束动画的接口，它到时自动消失或被回复顶掉",
+                        "condition": {
+                            "platform_specific.line.pre_ack_loading.enable": True,
                         },
                     },
                 },

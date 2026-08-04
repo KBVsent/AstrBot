@@ -52,9 +52,9 @@ class PreProcessStage(Stage):
         event: AstrMessageEvent,
     ) -> None | AsyncGenerator[None, None]:
         """在处理事件之前的预处理"""
+        platform = event.get_platform_name()
         # 平台特异配置：platform_specific.<platform>.pre_ack_emoji
         supported = {"telegram", "lark", "discord"}
-        platform = event.get_platform_name()
         cfg = (
             self.config.get("platform_specific", {})
             .get(platform, {})
@@ -72,6 +72,25 @@ class PreProcessStage(Stage):
             except Exception as e:
                 logger.warning(
                     f"Failed to send a pre-response reaction on {platform}: {e}"
+                )
+
+        # 作用等同于预回应表情，告知用户指令正在处理
+        loading_supported = {"line"}
+        loading_cfg = (
+            self.config.get("platform_specific", {})
+            .get(platform, {})
+            .get("pre_ack_loading", {})
+        ) or {}
+        if (
+            loading_cfg.get("enable", False)
+            and platform in loading_supported
+            and event.is_at_or_wake_command
+        ):
+            try:
+                await event.send_typing()
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send a pre-response loading state on {platform}: {e}"
                 )
 
         # 路径映射

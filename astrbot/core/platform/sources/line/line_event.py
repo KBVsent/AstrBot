@@ -28,6 +28,7 @@ from astrbot.api.message_components import (
     Reply,
     Video,
 )
+from astrbot.core import astrbot_config
 from astrbot.core.platform.astr_message_event import MessageType
 from astrbot.core.utils.media_utils import MediaResolver
 
@@ -49,7 +50,11 @@ from .line_text import truncate_utf16
 LINE_MAX_MESSAGES_PER_REPLY = 5
 LINE_TEXT_MAX_UTF16 = 5000
 LOADING_SECONDS = 20
-"""loading 动画时长（秒）。LINE 要求 5~60 且为 5 的倍数；到时自动消失或被新消息顶掉。"""
+"""loading 动画时长（秒）的默认值。LINE 要求 5~60 且为 5 的倍数；到时自动消失或被新消息顶掉。
+
+可用 platform_specific.line.pre_ack_loading.seconds 覆盖。长耗时指令把它调大即可 ——
+LINE 没有续期接口，动画一旦到时就消失，之后回复才到会留下一段空窗。
+"""
 
 _TEXT_MESSAGE_TYPES = frozenset({"text", "textV2"})
 
@@ -609,7 +614,19 @@ class LineMessageEvent(AstrMessageEvent):
         user_id = str(self.message_obj.sender.user_id or "").strip()
         if not user_id:
             return
-        await self.line_api.show_loading_animation(user_id, LOADING_SECONDS)
+        configured = (
+            astrbot_config.get("platform_specific", {})
+            .get("line", {})
+            .get("pre_ack_loading", {})
+            .get("seconds")
+        )
+        seconds = (
+            configured
+            if isinstance(configured, int) and configured > 0
+            else LOADING_SECONDS
+        )
+        # 5~60 且为 5 的倍数的规整由 show_loading_animation 负责。
+        await self.line_api.show_loading_animation(user_id, seconds)
 
     async def stop_typing(self) -> None:
         """LINE 没有提前结束 loading 动画的接口：它到时自动消失，或被新消息顶掉。"""
