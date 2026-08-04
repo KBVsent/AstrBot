@@ -199,6 +199,10 @@ def _raise_for_download_status(resp, url: str) -> None:
     )
 
 
+class MediaTooLargeError(Exception):
+    """Download aborted because the payload exceeded the caller's byte limit."""
+
+
 async def _download_response_to_file(
     resp,
     file_obj,
@@ -206,6 +210,7 @@ async def _download_response_to_file(
     show_progress: bool,
     progress_callback,
     show_downloading_label: bool = True,
+    max_bytes: int | None = None,
 ) -> None:
     """Write a successful download response to a local file.
 
@@ -216,10 +221,20 @@ async def _download_response_to_file(
         show_progress: Whether to print progress to stdout.
         progress_callback: Optional callback for progress payloads.
         show_downloading_label: Whether to use the standard download heading.
+        max_bytes: Optional byte ceiling. The declared length is checked first, and
+            the transfer is aborted once the accumulated size exceeds the limit —
+            servers commonly omit Content-Length, so both checks are needed.
 
+    Raises:
+        MediaTooLargeError: The response exceeds max_bytes.
     """
 
     total_size = int(resp.headers.get("content-length", 0))
+    if max_bytes is not None and total_size > max_bytes:
+        raise MediaTooLargeError(
+            f"declared size {total_size} exceeds limit {max_bytes}: "
+            f"{_safe_url_for_log(url)}"
+        )
     downloaded_size = 0
     start_time = time.time()
     if show_progress:
@@ -244,8 +259,12 @@ async def _download_response_to_file(
         chunk = await resp.content.read(8192)
         if not chunk:
             break
-        file_obj.write(chunk)
         downloaded_size += len(chunk)
+        if max_bytes is not None and downloaded_size > max_bytes:
+            raise MediaTooLargeError(
+                f"size exceeds limit {max_bytes}: {_safe_url_for_log(url)}"
+            )
+        file_obj.write(chunk)
         elapsed_time = time.time() - start_time if time.time() - start_time > 0 else 1
         speed = downloaded_size / 1024 / elapsed_time  # KB/s
         percent = downloaded_size / total_size if total_size > 0 else 0
@@ -282,6 +301,7 @@ async def download_file(
     show_progress: bool = False,
     progress_callback=None,
     allow_insecure_ssl_fallback: bool = True,
+    max_bytes: int | None = None,
 ) -> None:
     """Download a remote file to a local path.
 
@@ -292,9 +312,14 @@ async def download_file(
         progress_callback: Optional callback for progress payloads.
         allow_insecure_ssl_fallback: Whether certificate failures may retry with
             TLS certificate verification disabled.
+        max_bytes: Optional byte ceiling; the transfer is aborted once it is
+            exceeded. None (default) means unlimited.
 
     Returns:
         None.
+
+    Raises:
+        MediaTooLargeError: The response exceeds max_bytes.
     """
 
     try:
@@ -315,6 +340,7 @@ async def download_file(
                         url,
                         show_progress,
                         progress_callback,
+                        max_bytes=max_bytes,
                     )
     except (aiohttp.ClientConnectorSSLError, aiohttp.ClientConnectorCertificateError):
         if not allow_insecure_ssl_fallback:
@@ -344,6 +370,7 @@ async def download_file(
                         show_progress,
                         progress_callback,
                         show_downloading_label=False,
+                        max_bytes=max_bytes,
                     )
     if show_progress:
         print()

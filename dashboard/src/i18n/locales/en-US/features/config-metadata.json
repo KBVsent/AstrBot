@@ -1229,7 +1229,7 @@
       },
       "image_host": {
         "description": "Image hosting backends",
-        "hint": "A JSON array. Uploads local images to image hosting services to get long-lived public URLs, shared by platform adapters. Each item is a backend instance: {\"id\", \"type\", \"enable\", ...credentials}. Adapters reference instances by id via their \"image host chain\"; empty means all enabled backends in this order."
+        "hint": "A JSON array. Uploads local media to image hosting services to get long-lived public URLs, shared by platform adapters. Each item is a backend instance: {\"id\", \"type\", \"enable\", ...credentials}. Adapters reference instances by id via their \"image host chain\"; empty means all enabled backends in this order. Add \"mime_types\" to declare which MIME types a backend accepts (e.g. [\"image/*\", \"video/*\"], [\"*/*\"]); omitted means images only."
       }
     }
   },

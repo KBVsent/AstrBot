@@ -138,6 +138,9 @@ class Record(BaseMessageComponent):
     url: str | None = ""
     # Original text content (e.g. TTS source text), used as caption in fallback scenarios
     text: str | None = None
+    duration: int | None = None
+    """音频时长（毫秒）。调用方已知时填写，平台需要而本地文件不可探测时（如只有外链）会用到；
+    不需要的平台忽略该字段。"""
     # 额外
     path: str | None = None
 

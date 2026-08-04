@@ -4522,7 +4522,7 @@ CONFIG_METADATA_3_SYSTEM = {
                         "description": "图床后端",
                         "type": "string",
                         "editor_mode": True,
-                        "hint": 'JSON 数组，把本地图片上传到图床得到长期外链，供各平台适配器复用。每项一个后端实例：{"id", "type", "enable", ...凭据}。适配器配置里的「图床优先链」按 id 引用，留空则按此处顺序用全部已启用后端。',
+                        "hint": 'JSON 数组，把本地媒体上传到图床得到长期外链，供各平台适配器复用。每项一个后端实例：{"id", "type", "enable", ...凭据}。适配器配置里的「图床优先链」按 id 引用，留空则按此处顺序用全部已启用后端。可加 "mime_types" 声明该后端接受的类型（如 ["image/*", "video/*"]、["*/*"]），不写则只接受图片。',
                     },
                     "pip_install_arg": {
                         "description": "pip 安装额外参数",

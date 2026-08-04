@@ -25,6 +25,10 @@ from PIL import Image as PILImage
 
 from astrbot import logger
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+# MediaTooLargeError 定义在 io 层（下载即在那里发生），这里再导出一次，
+# 媒体侧调用方无需感知分层。
+from astrbot.core.utils.io import MediaTooLargeError as MediaTooLargeError
 from astrbot.core.utils.io import download_file
 from astrbot.core.utils.tencent_record_helper import (
     tencent_silk_to_wav,
@@ -108,11 +112,12 @@ Examples:
 @dataclass(slots=True)
 class ResolvedMediaData:
     """Base64 media bytes plus the metadata needed by provider payloads.
-
-    Attributes:
-        base64_data: Raw base64 payload without a ``data:`` URI prefix.
-        mime_type: MIME type to send with provider payloads.
-        format: Optional normalized media format, such as ``wav`` for audio.
+    
+        Attributes:
+            base64_data: Raw base64 payload without a ``data:`` URI prefix.
+            mime_type: MIME type to send with provider payloads.
+            format: Optional normalized media format, such as ``wav`` for audio.
+        
     """
 
     base64_data: str
@@ -141,10 +146,11 @@ class _LocalMediaFile:
 @dataclass(slots=True)
 class ResolvedMediaFile:
     """A media reference resolved to a local path.
-
-    ``cleanup_paths`` contains temporary files owned by the resolver. Callers that
-    use ``MediaResolver.as_path()`` get automatic cleanup; callers that need to
-    keep a path after the resolver returns should use ``MediaResolver.to_path()``.
+    
+        ``cleanup_paths`` contains temporary files owned by the resolver. Callers that
+        use ``MediaResolver.as_path()`` get automatic cleanup; callers that need to
+        keep a path after the resolver returns should use ``MediaResolver.to_path()``.
+        
     """
 
     source_ref: MediaRefStr
@@ -182,12 +188,13 @@ class ResolvedMediaFile:
 
 def is_file_uri(value: object) -> bool:
     """Return whether a value is a ``file:`` URI.
-
-    Args:
-        value: Candidate media reference or local path.
-
-    Returns:
-        ``True`` only for string values whose parsed URI scheme is ``file``.
+    
+        Args:
+            value: Candidate media reference or local path.
+    
+        Returns:
+            ``True`` only for string values whose parsed URI scheme is ``file``.
+        
     """
 
     if not isinstance(value, str):
@@ -200,13 +207,14 @@ def is_file_uri(value: object) -> bool:
 
 def file_uri_to_path(file_uri: MediaRefStr) -> str:
     """Normalize file URIs to local filesystem paths.
-
-    Args:
-        file_uri: A ``file:`` URI or a plain filesystem path.
-
-    Returns:
-        The local filesystem path decoded with standard-library URL path rules.
-        Non-``file:`` inputs are returned unchanged for convenience.
+    
+        Args:
+            file_uri: A ``file:`` URI or a plain filesystem path.
+    
+        Returns:
+            The local filesystem path decoded with standard-library URL path rules.
+            Non-``file:`` inputs are returned unchanged for convenience.
+        
     """
 
     if not is_file_uri(file_uri):
@@ -276,18 +284,19 @@ def _decode_base64_payload(
     validate: bool = False,
 ) -> bytes:
     """Decode a base64 payload while tolerating omitted padding.
-
-    Args:
-        payload: Base64 payload without a data URI header.
-        error_message: Message to use when decoding fails.
-        validate: Whether to ask ``base64.b64decode`` to reject non-base64
-            characters.
-
-    Returns:
-        Decoded bytes.
-
-    Raises:
-        ValueError: Raised when the payload cannot be decoded.
+    
+        Args:
+            payload: Base64 payload without a data URI header.
+            error_message: Message to use when decoding fails.
+            validate: Whether to ask ``base64.b64decode`` to reject non-base64
+                characters.
+    
+        Returns:
+            Decoded bytes.
+    
+        Raises:
+            ValueError: Raised when the payload cannot be decoded.
+        
     """
     payload = "".join(payload.split())
     missing_padding = len(payload) % 4
@@ -364,14 +373,15 @@ def detect_image_mime_type(
     default_mime_type: str | None = "image/jpeg",
 ) -> str | None:
     """Detect an image MIME type from encoded bytes or a local path.
-
-    Args:
-        image_source: Encoded image bytes or a local image path to inspect.
-        default_mime_type: MIME type to return when detection fails.
-
-    Returns:
-        The detected MIME type, or ``default_mime_type`` when detection fails or
-        the format is unknown.
+    
+        Args:
+            image_source: Encoded image bytes or a local image path to inspect.
+            default_mime_type: MIME type to return when detection fails.
+    
+        Returns:
+            The detected MIME type, or ``default_mime_type`` when detection fails or
+            the format is unknown.
+        
     """
 
     try:
@@ -395,14 +405,15 @@ async def detect_image_mime_type_async(
     default_mime_type: str | None = "image/jpeg",
 ) -> str | None:
     """Detect an image MIME type without blocking the event loop.
-
-    Args:
-        image_source: Encoded image bytes or a local image path to inspect.
-        default_mime_type: MIME type to return when detection fails.
-
-    Returns:
-        The detected MIME type, or ``default_mime_type`` when detection fails or
-        the format is unknown.
+    
+        Args:
+            image_source: Encoded image bytes or a local image path to inspect.
+            default_mime_type: MIME type to return when detection fails.
+    
+        Returns:
+            The detected MIME type, or ``default_mime_type`` when detection fails or
+            the format is unknown.
+        
     """
 
     return await asyncio.to_thread(
@@ -410,6 +421,116 @@ async def detect_image_mime_type_async(
         image_source,
         default_mime_type=default_mime_type,
     )
+
+
+def normalize_mime_type(mime_type: str | None) -> str:
+    """Normalize a MIME type string: strip parameters, lowercase, unify aliases.
+
+    Args:
+        mime_type: Raw MIME type, possibly with parameters (; charset=...).
+
+    Returns:
+        The normalized MIME type, or an empty string when the input is empty.
+    """
+    if not mime_type:
+        return ""
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    aliases = {
+        "image/jpg": "image/jpeg",
+        "image/pjpeg": "image/jpeg",
+        "audio/mp3": "audio/mpeg",
+        "audio/mpeg3": "audio/mpeg",
+        "audio/x-mpeg-3": "audio/mpeg",
+        "audio/m4a": "audio/mp4",
+        "audio/x-m4a": "audio/mp4",
+        "audio/wave": "audio/wav",
+        "audio/x-wav": "audio/wav",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _sniff_container_mime_type(header: bytes) -> str:
+    """Detect a non-image container MIME type from leading file bytes."""
+    if len(header) < 12:
+        return ""
+
+    if header[4:8] == b"ftyp":
+        brand = header[8:12].lower()
+        if brand.startswith(b"qt"):
+            return "video/quicktime"
+        if brand in {b"m4a ", b"m4b ", b"m4p "}:
+            return "audio/mp4"
+        return "video/mp4"
+
+    if header[:4] == b"\x1a\x45\xdf\xa3":
+        # Matroska/WebM share the EBML header; treat both as WebM.
+        return "video/webm"
+
+    if header[:4] == b"RIFF":
+        if header[8:12] == b"WAVE":
+            return "audio/wav"
+        if header[8:12] == b"AVI ":
+            return "video/x-msvideo"
+
+    if header[:3] == b"ID3" or header[:2] in {b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"}:
+        return "audio/mpeg"
+
+    if header[:4] == b"OggS":
+        return "audio/opus" if b"OpusHead" in header else "audio/ogg"
+
+    if header[:4] == b"fLaC":
+        return "audio/flac"
+
+    if header[:5] == b"#!AMR":
+        return "audio/amr"
+
+    return ""
+
+
+def detect_file_mime_type(file_path: str | Path) -> str:
+    """Detect a file's MIME type by content first, falling back to its extension.
+
+    Content-first detection matters when a file has been transcoded or compressed
+    and its suffix no longer matches the real payload.
+
+    Args:
+        file_path: Local file path to inspect.
+
+    Returns:
+        The normalized MIME type, or application/octet-stream when the type
+        cannot be determined.
+    """
+    path = Path(file_path)
+    image_mime = detect_image_mime_type(path, default_mime_type=None)
+    if image_mime:
+        return normalize_mime_type(image_mime)
+
+    try:
+        with open(path, "rb") as f:
+            header = f.read(64)
+    except OSError:
+        header = b""
+
+    container_mime = _sniff_container_mime_type(header)
+    if container_mime:
+        return container_mime
+
+    guessed = mimetypes.guess_type(path.name)[0]
+    if guessed:
+        return normalize_mime_type(guessed)
+    return "application/octet-stream"
+
+
+async def detect_file_mime_type_async(file_path: str | Path) -> str:
+    """Detect a file's MIME type without blocking the event loop.
+
+    Args:
+        file_path: Local file path to inspect.
+
+    Returns:
+        The normalized MIME type, or application/octet-stream when unknown.
+    """
+    return await asyncio.to_thread(detect_file_mime_type, file_path)
 
 
 def _guess_mime_type(path: Path, fallback: str | None = None) -> str | None:
@@ -431,6 +552,7 @@ async def _materialize_media_ref(
     *,
     media_type: str = "file",
     default_suffix: str | None = None,
+    max_bytes: int | None = None,
 ) -> _LocalMediaFile:
     """Resolve a plugin-facing media reference to a local file.
 
@@ -441,6 +563,10 @@ async def _materialize_media_ref(
         media_ref: Original media reference from a platform, plugin, or history.
         media_type: Logical media family used for temp filenames and defaults.
         default_suffix: Suffix to use when the reference does not carry one.
+        max_bytes: Optional byte ceiling for remote downloads; None is unlimited.
+
+    Raises:
+        MediaTooLargeError: A remote download exceeded max_bytes.
     """
 
     cleanup_paths: list[Path] = []
@@ -455,7 +581,7 @@ async def _materialize_media_ref(
             target_path = _temp_media_path(media_type, target_suffix)
         cleanup_paths.append(target_path)
         try:
-            await download_file(media_ref, str(target_path))
+            await download_file(media_ref, str(target_path), max_bytes=max_bytes)
         except Exception:
             _cleanup_paths(cleanup_paths)
             raise
@@ -586,13 +712,17 @@ class MediaResolver:
     paths alive for callers that need to hand them to platform SDKs.
 
     Args:
-        media_ref: Source media reference. It may be a local path, ``file://`` URI,
-            HTTP(S) URL, ``base64://`` payload, base64 data URI, or legacy bare
+        media_ref: Source media reference. It may be a local path, file:// URI,
+            HTTP(S) URL, base64:// payload, base64 data URI, or legacy bare
             base64 payload.
-        media_type: Logical media family. ``audio`` enables format conversion and
-            defaults to WAV output; ``image`` enables image MIME detection.
+        media_type: Logical media family. audio enables format conversion and
+            defaults to WAV output; image enables image MIME detection.
         default_suffix: Fallback suffix for temporary files when the source does
             not expose one.
+        max_bytes: Optional byte ceiling for remote downloads. The declared length
+            is checked first and the transfer is aborted once the accumulated size
+            exceeds the limit, so a missing Content-Length cannot bypass it.
+            None (default) keeps the previous unlimited behaviour.
     """
 
     def __init__(
@@ -601,10 +731,12 @@ class MediaResolver:
         *,
         media_type: str = "file",
         default_suffix: str | None = None,
+        max_bytes: int | None = None,
     ) -> None:
         self.media_ref = media_ref
         self.media_type = media_type
         self.default_suffix = default_suffix
+        self.max_bytes = max_bytes
 
     async def _resolve_path(
         self,
@@ -613,16 +745,18 @@ class MediaResolver:
         preserve_mp3: bool = False,
     ) -> ResolvedMediaFile:
         """Materialize the source and apply media-type-specific conversion.
-
-        For audio, ``target_format`` controls the output format, including the
-        QQ / Wechat / Wecom ``tencent_silk`` upload format. When it is not set, audio
-        resolves to WAV unless ``preserve_mp3`` is true and the source already
-        appears to be MP3.
+        
+                For audio, ``target_format`` controls the output format, including the
+                QQ / Wechat / Wecom ``tencent_silk`` upload format. When it is not set, audio
+                resolves to WAV unless ``preserve_mp3`` is true and the source already
+                appears to be MP3.
+                
         """
         local_file = await _materialize_media_ref(
             self.media_ref,
             media_type=self.media_type,
             default_suffix=self.default_suffix,
+            max_bytes=self.max_bytes,
         )
         cleanup_paths = list(local_file.cleanup_paths)
         resolved_path = local_file.path
@@ -703,10 +837,11 @@ class MediaResolver:
         preserve_mp3: bool = False,
     ) -> AsyncIterator[ResolvedMediaFile]:
         """Yield a resolved local file and clean resolver-owned temp files on exit.
-
-        Use this when the consumer only needs the file during the context manager.
-        For audio, pass ``target_format`` to force a format such as ``wav`` or
-        ``tencent_silk``.
+        
+                Use this when the consumer only needs the file during the context manager.
+                For audio, pass ``target_format`` to force a format such as ``wav`` or
+                ``tencent_silk``.
+                
         """
         resolved = await self._resolve_path(
             target_format=target_format,
@@ -772,15 +907,16 @@ class MediaResolver:
         default_mime_type: str | None = "image/jpeg",
     ) -> ResolvedMediaData | None:
         """Resolve media to base64 data plus MIME metadata.
-
-        Args:
-            strict: Raise on invalid or unreadable media instead of returning
-                ``None`` where the resolver can safely ignore the reference.
-            target_format: Optional output format for audio conversion.
-            preserve_mp3: Keep existing MP3 audio as MP3 when no target format is
-                provided; otherwise audio defaults to WAV.
-            default_mime_type: Fallback MIME type for legacy image base64 payloads
-                whose bytes cannot be identified.
+        
+                Args:
+                    strict: Raise on invalid or unreadable media instead of returning
+                        ``None`` where the resolver can safely ignore the reference.
+                    target_format: Optional output format for audio conversion.
+                    preserve_mp3: Keep existing MP3 audio as MP3 when no target format is
+                        provided; otherwise audio defaults to WAV.
+                    default_mime_type: Fallback MIME type for legacy image base64 payloads
+                        whose bytes cannot be identified.
+                
         """
         if self.media_type == "image":
             async with self.as_path(target_format=target_format) as resolved:
@@ -889,9 +1025,10 @@ async def resolve_image_ref_to_base64_data(
     default_mime_type: str | None = "image/jpeg",
 ) -> ResolvedMediaData | None:
     """Resolve an image reference to base64 data and a detected MIME type.
-
-    ``strict=False`` returns ``None`` for invalid images so provider payload
-    assembly can skip bad image refs without failing the whole request.
+    
+        ``strict=False`` returns ``None`` for invalid images so provider payload
+        assembly can skip bad image refs without failing the whole request.
+        
     """
 
     return await MediaResolver(
@@ -911,10 +1048,11 @@ async def resolve_audio_ref_to_base64_data(
     target_format: str | None = None,
 ) -> ResolvedMediaData:
     """Resolve an audio reference to base64 data.
-
-    Audio is converted to WAV by default. Pass preserve_mp3=True for legacy
-    provider payloads that intentionally keep MP3 input unchanged.
-    ``target_format`` overrides both defaults when provided.
+    
+        Audio is converted to WAV by default. Pass preserve_mp3=True for legacy
+        provider payloads that intentionally keep MP3 input unchanged.
+        ``target_format`` overrides both defaults when provided.
+        
     """
 
     audio_data = await MediaResolver(
@@ -938,9 +1076,10 @@ async def resolve_media_ref_to_base64_data(
     strict: bool = False,
 ) -> ResolvedMediaData | None:
     """Resolve a media reference to base64 data through one shared entrypoint.
-
-    This helper keeps provider sources from knowing whether a reference is local,
-    HTTP(S), ``base64://``, a data URI, or a legacy bare base64 payload.
+    
+        This helper keeps provider sources from knowing whether a reference is local,
+        HTTP(S), ``base64://``, a data URI, or a legacy bare base64 payload.
+        
     """
 
     if media_type == "image":
@@ -958,12 +1097,13 @@ async def resolve_media_ref_to_base64_data(
 
 async def get_media_duration(file_path: str) -> int | None:
     """Probe media duration with ffprobe.
-
-    Args:
-        file_path: Local media file path.
-
-    Returns:
-        Duration in milliseconds, or ``None`` when probing fails.
+    
+        Args:
+            file_path: Local media file path.
+    
+        Returns:
+            Duration in milliseconds, or ``None`` when probing fails.
+        
     """
     try:
         # Probe duration with ffprobe.
@@ -1024,18 +1164,19 @@ async def convert_video_format(
     video_path: str, output_format: str = "mp4", output_path: str | None = None
 ) -> str:
     """Convert a video file with ffmpeg.
-
-    Args:
-        video_path: Source video file path.
-        output_format: Target format, such as ``mp4``.
-        output_path: Optional output file path. When omitted, a temporary path is
-            created under AstrBot's temp directory.
-
-    Returns:
-        The converted video file path.
-
-    Raises:
-        Exception: Raised when ffmpeg is unavailable or conversion fails.
+    
+        Args:
+            video_path: Source video file path.
+            output_format: Target format, such as ``mp4``.
+            output_path: Optional output file path. When omitted, a temporary path is
+                created under AstrBot's temp directory.
+    
+        Returns:
+            The converted video file path.
+    
+        Raises:
+            Exception: Raised when ffmpeg is unavailable or conversion fails.
+        
     """
     # Return early when the source already appears to be in the target format.
     if video_path.lower().endswith(f".{output_format}"):
@@ -1113,19 +1254,20 @@ async def convert_audio_format(
     output_path: str | None = None,
 ) -> str:
     """Convert an audio file to the requested format with ffmpeg.
-
-    Args:
-        audio_path: Source audio file path.
-        output_format: Target format, such as ``amr``, ``ogg``, ``opus``, or
-            ``wav``.
-        output_path: Optional output file path. When omitted, a temporary path is
-            created under AstrBot's temp directory.
-
-    Returns:
-        The converted audio file path.
-
-    Raises:
-        Exception: Raised when ffmpeg is unavailable or conversion fails.
+    
+        Args:
+            audio_path: Source audio file path.
+            output_format: Target format, such as ``amr``, ``ogg``, ``opus``, or
+                ``wav``.
+            output_path: Optional output file path. When omitted, a temporary path is
+                created under AstrBot's temp directory.
+    
+        Returns:
+            The converted audio file path.
+    
+        Raises:
+            Exception: Raised when ffmpeg is unavailable or conversion fails.
+        
     """
     if audio_path.lower().endswith(f".{output_format}"):
         return audio_path
@@ -1373,13 +1515,14 @@ async def ensure_jpeg(image_path: str, output_path: str | None = None) -> str:
 
 def _get_audio_magic_type(audio_path: str) -> str:
     """Detect common audio formats from magic bytes.
-
-    Args:
-        audio_path: Local audio path to inspect.
-
-    Returns:
-        A normalized format name such as ``wav``, ``mp3``, ``opus``, ``silk``, or
-        an empty string when the type cannot be detected.
+    
+        Args:
+            audio_path: Local audio path to inspect.
+    
+        Returns:
+            A normalized format name such as ``wav``, ``mp3``, ``opus``, ``silk``, or
+            an empty string when the type cannot be detected.
+        
     """
     try:
         with open(audio_path, "rb") as f:
@@ -1489,16 +1632,17 @@ def _compress_image_sync(
     optimize: bool,
 ) -> str | None:
     """Run image compression synchronously via ``asyncio.to_thread``.
-
-    Args:
-        source: Encoded image bytes or a local path to open inside the worker.
-        temp_dir: Directory where the compressed image should be written.
-        max_size: Longest edge of the compressed image in pixels.
-        quality: JPEG output quality in the range 1-100.
-        optimize: Whether Pillow should optimize the saved image.
-
-    Returns:
-        The compressed image path, or ``None`` when the image should be kept as-is.
+    
+        Args:
+            source: Encoded image bytes or a local path to open inside the worker.
+            temp_dir: Directory where the compressed image should be written.
+            max_size: Longest edge of the compressed image in pixels.
+            quality: JPEG output quality in the range 1-100.
+            optimize: Whether Pillow should optimize the saved image.
+    
+        Returns:
+            The compressed image path, or ``None`` when the image should be kept as-is.
+        
     """
     fp = io.BytesIO(source) if isinstance(source, bytes) else source
     with PILImage.open(fp) as opened_img:
