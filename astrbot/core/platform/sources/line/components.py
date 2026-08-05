@@ -151,6 +151,8 @@ class LineQuickReply(BaseMessageComponent):
     items 上限 13，超出部分丢弃。
     """
 
+    is_control_component: ClassVar[bool] = True
+
     type: str = "line_quick_reply"  # type: ignore[assignment]
     items: list[LineQuickReplyItem] = []
 

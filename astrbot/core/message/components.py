@@ -29,6 +29,7 @@ import sys
 import uuid
 from enum import Enum
 from pathlib import Path, PurePosixPath
+from typing import ClassVar
 
 from deprecated import deprecated
 
@@ -72,6 +73,9 @@ class ComponentType(str, Enum):
 
 class BaseMessageComponent(BaseModel):
     type: ComponentType
+
+    # 控制组件标记：该组件不产出任何可见消息内容，只修饰同一批次里的其他消息
+    is_control_component: ClassVar[bool] = False
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)

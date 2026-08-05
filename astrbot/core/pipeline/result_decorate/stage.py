@@ -417,9 +417,11 @@ class ResultDecorateStage(Stage):
                     )
                     result.chain = [node]
 
-            # at 回复 / 引用回复仅适用于纯文本或图文消息
+            # at 回复 / 引用回复仅适用于纯文本、图文消息和控制组件，其他类型消息不支持
             can_decorate = all(
-                isinstance(item, (Plain, Image)) for item in result.chain
+                isinstance(item, (Plain, Image))
+                or getattr(item, "is_control_component", False)
+                for item in result.chain
             )
             if can_decorate:
                 # at 回复
