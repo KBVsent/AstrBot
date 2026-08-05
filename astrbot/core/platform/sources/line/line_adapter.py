@@ -96,6 +96,25 @@ _EVENT_WORKER_COUNT = 4
 _TERMINATE_TIMEOUT_SECONDS = 20.0
 
 
+def _evict_profile_cache(
+    cache: OrderedDict[Any, tuple[float, Any]], now: float
+) -> None:
+    """清掉过期项，并把缓存压回容量上限内 —— 否则长跑大群会无界增长。
+
+    昵称与界面语言两个缓存共用：都从同一个 profile 端点派生，新鲜度要求一致。
+    """
+    expired = [
+        key
+        for key, (cached_at, _) in cache.items()
+        if now - cached_at >= _NICKNAME_TTL_SECONDS
+    ]
+    for key in expired:
+        cache.pop(key, None)
+    while len(cache) > _NICKNAME_CACHE_CAPACITY:
+        # 最久未命中的先出（读命中会 move_to_end）。
+        cache.popitem(last=False)
+
+
 @register_platform_adapter(
     "line",
     "LINE Messaging API 适配器",
@@ -127,6 +146,8 @@ class LinePlatformAdapter(Platform):
         self._nickname_cache: OrderedDict[tuple[str, str], tuple[float, str]] = (
             OrderedDict()
         )
+        # user_id -> (取回时刻, BCP 47 语言码或 None)。缓存 None 是有意的，见 _resolve_language。
+        self._language_cache: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
 
         channel_access_token = str(platform_config.get("channel_access_token", ""))
         channel_secret = str(platform_config.get("channel_secret", ""))
@@ -661,21 +682,33 @@ class LinePlatformAdapter(Platform):
         if not name:
             return fallback
         self._nickname_cache[cache_key] = (now, name)
-        self._evict_nicknames(now)
+        _evict_profile_cache(self._nickname_cache, now)
         return name
 
-    def _evict_nicknames(self, now: float) -> None:
-        """清掉过期项，并把缓存压回容量上限内 —— 否则长跑大群会无界增长。"""
-        expired = [
-            key
-            for key, (cached_at, _) in self._nickname_cache.items()
-            if now - cached_at >= _NICKNAME_TTL_SECONDS
-        ]
-        for key in expired:
-            self._nickname_cache.pop(key, None)
-        while len(self._nickname_cache) > _NICKNAME_CACHE_CAPACITY:
-            # 最久未命中的先出（读命中会 move_to_end）。
-            self._nickname_cache.popitem(last=False)
+    # ------------------------------------------------------------ 界面语言
+
+    async def _resolve_language(self, user_id: str) -> str | None:
+        """取用户的界面语言（BCP 47），带 TTL 缓存；取不到返回 None。
+
+        与昵称共用一套缓存写法，但键只有 user_id —— language 是账号级属性，
+        与所在群聊无关。取不到是常态（见 LineAPIClient.get_user_language），
+        所以失败结果同样入缓存，否则群里非好友成员每条消息都要白打一次 API。
+        """
+        if not user_id:
+            return None
+
+        now = time.time()
+        cached = self._language_cache.get(user_id)
+        if cached is not None:
+            if now - cached[0] < _NICKNAME_TTL_SECONDS:
+                self._language_cache.move_to_end(user_id)
+                return cached[1]
+            self._language_cache.pop(user_id, None)
+
+        language = await self.line_api.get_user_language(user_id)
+        self._language_cache[user_id] = (now, language)
+        _evict_profile_cache(self._language_cache, now)
+        return language
 
     # ------------------------------------------------------------ 出站
 
@@ -772,6 +805,13 @@ class LinePlatformAdapter(Platform):
 
     async def handle_msg(self, abm: AstrBotMessage) -> None:
         event = self.create_event(abm)
+
+        # LINE 不在 webhook 事件里下发 locale，只能主动查 profile。放在这里而不是
+        # create_event 里，是因为后者是同步的，且还被 star tool 的构造路径复用。
+        language = await self._resolve_language(abm.sender.user_id)
+        if language:
+            event.set_extra("user_locale", language)
+
         if event.is_postback():
             # 未被插件处理的 postback 不触发默认 LLM（私聊同样成立）。真正的闸门是
             # process_stage 里的 not event.call_llm；预设 is_wake 之类的标志无效，

@@ -432,7 +432,26 @@ class LineAPIClient:
             f"{LINE_API_BASE}/v2/bot/room/{room_id}/member/{user_id}"
         )
 
+    async def get_user_language(self, user_id: str) -> str | None:
+        """取用户的界面语言（BCP 47，如 ja / zh-Hant）。取不到返回 None。
+
+        /v2/bot/profile/{userId} 是账号级端点，只认该 userId 是不是本官方账号的
+        follower，与消息来自 1:1 还是群聊无关；群聊与多人聊天的 member profile 端点
+        没有 language，所以这里不试那两个。
+
+        取不到是常态，且有两种：404 表示不是 follower（未加好友或已拉黑），
+        200 但响应无 language 键表示已是 follower 但用户未同意 LINE 隐私政策。
+        """
+        data = await self._get_profile(f"{LINE_API_BASE}/v2/bot/profile/{user_id}")
+        language = str((data or {}).get("language", "")).strip()
+        return language or None
+
     async def _get_display_name(self, url: str) -> str | None:
+        data = await self._get_profile(url)
+        display_name = str((data or {}).get("displayName", "")).strip()
+        return display_name or None
+
+    async def _get_profile(self, url: str) -> dict | None:
         try:
             session = await self._get_session()
             async with session.get(url, headers=self._auth_headers) as resp:
@@ -441,12 +460,10 @@ class LineAPIClient:
                         "[LINE] get profile failed: url=%s status=%s", url, resp.status
                     )
                     return None
-                data = self._parse_json_body(await resp.text())
+                return self._parse_json_body(await resp.text())
         except Exception as e:
             logger.debug("[LINE] get profile error: url=%s %s", url, e)
             return None
-        display_name = str((data or {}).get("displayName", "")).strip()
-        return display_name or None
 
     async def show_loading_animation(
         self,

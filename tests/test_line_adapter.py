@@ -1071,3 +1071,61 @@ async def test_nickname_cache_evicts_expired_and_cold_entries(monkeypatch):
     cached_at, name = adapter._nickname_cache[stale_key]
     assert name == "Display Name"
     assert time.time() - cached_at < adapter_module._NICKNAME_TTL_SECONDS
+
+
+# ------------------------------------------------------------------- 界面语言
+
+
+@pytest.mark.asyncio
+async def test_user_language_is_cached_including_misses():
+    """取不到 language 是常态（群成员 / 未同意隐私政策），必须同样入缓存。
+
+    否则群里每来一条消息都会白打一次 profile API。
+    """
+    adapter = make_adapter()
+    calls: list[str] = []
+
+    async def fake_language(user_id: str) -> str | None:
+        calls.append(user_id)
+        return "ja" if user_id == "U1" else None
+
+    adapter.line_api.get_user_language = fake_language  # type: ignore[method-assign]
+
+    assert await adapter._resolve_language("U1") == "ja"
+    assert await adapter._resolve_language("U1") == "ja"
+    assert await adapter._resolve_language("U2") is None
+    assert await adapter._resolve_language("U2") is None
+    assert calls == ["U1", "U2"]
+
+    # 空 user_id 不打 API。
+    assert await adapter._resolve_language("") is None
+    assert calls == ["U1", "U2"]
+
+
+@pytest.mark.asyncio
+async def test_handle_msg_sets_user_locale_extra():
+    adapter = make_adapter()
+
+    async def fake_language(user_id: str) -> str | None:
+        return "zh-Hant" if user_id == "U1" else None
+
+    adapter.line_api.get_user_language = fake_language  # type: ignore[method-assign]
+
+    abm = await adapter.convert_message(text_event("e-locale"))
+    assert abm is not None
+    await adapter.handle_msg(abm)
+    event = adapter.committed_events.get_nowait()
+    assert event.get_extra("user_locale") == "zh-Hant"
+
+    # 取不到语言时不写 extra，让上层走各自的平台默认。
+    adapter._language_cache.clear()
+
+    async def no_language(_user_id: str) -> str | None:
+        return None
+
+    adapter.line_api.get_user_language = no_language  # type: ignore[method-assign]
+    abm = await adapter.convert_message(text_event("e-locale-miss"))
+    assert abm is not None
+    await adapter.handle_msg(abm)
+    event = adapter.committed_events.get_nowait()
+    assert event.get_extra("user_locale") is None
