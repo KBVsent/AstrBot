@@ -32,12 +32,13 @@ from astrbot.core import astrbot_config
 from astrbot.core.platform.astr_message_event import MessageType
 from astrbot.core.utils.media_utils import MediaResolver
 
-from .components import LineFlex, LineQuickReply, LineRawMessage
+from .components import LineFlex, LineFlexMedia, LineQuickReply, LineRawMessage
 from .line_api import LineAPIClient, LineSendResult
 from .line_cache import LineQuoteStore
 from .line_media import (
     EXTERNAL_IMAGE_LIMIT,
     extract_local_video_cover,
+    prepare_flex_media,
     prepare_line_audio,
     prepare_line_image,
     prepare_line_preview,
@@ -222,8 +223,11 @@ async def _component_to_message_object(
     chain: list[str] | None,
 ) -> dict[str, Any] | None:
     """把单个非文本组件转换成 LINE 消息对象；无法产出合法对象时返回 None。"""
-    if isinstance(segment, LineFlex) or isinstance(segment, LineRawMessage):
+    if isinstance(segment, LineRawMessage):
         return segment.to_line_dict()
+
+    if isinstance(segment, LineFlex):
+        return await _flex_to_message(segment, chain)
 
     if isinstance(segment, Image):
         return await _image_to_message(segment, chain)
@@ -245,6 +249,139 @@ async def _component_to_message_object(
 
     logger.debug("[LINE] unsupported outbound component skipped: %s", segment.type)
     return None
+
+
+# ---------------------------------------------------------------- Flex 媒体
+
+
+async def _flex_to_message(
+    segment: LineFlex, chain: list[str] | None
+) -> dict[str, Any] | None:
+    """Flex：把 contents 里的媒体占位符换成公网 URL，其余部分原样透传。
+
+    没有占位符时是零开销直通，与「Flex 结构由插件负责」的边界一致 —— 只有插件显式用
+    LineFlex.ref() 占位并在 media 里给出 Image 才会触发转换。
+
+    任一被引用的媒体拿不到 URL 就整条降级为 alt_text 文本：alt_text 本就是 LINE 为
+    「Flex 无法渲染时显示什么」准备的字段，而把缺图的半成品 Flex 放进批次会让整批 400。
+    """
+    referenced = _collect_flex_media_refs(segment.contents)
+    unused = set(segment.media) - referenced
+    if unused:
+        logger.debug(
+            "[LINE] flex media key(s) not referenced in contents, ignored: %s",
+            ", ".join(sorted(unused)),
+        )
+    if not referenced:
+        return segment.to_line_dict()
+
+    # 两级去重，只在这一条 Flex 的转换过程内有效：
+    # 同一个 Image 对象被多个 key 引用时只物化一次（base64 解码 / 外链下载都不便宜）；
+    # 不同 profile 收敛到同一个文件时（例如源图本来就在 1024 以内，image 与 original
+    # 都短路返回原路径）只上传一次。
+    localized: dict[int, str | None] = {}
+    uploaded: dict[str, str | None] = {}
+
+    resolved: dict[str, str] = {}
+    for key in sorted(referenced):
+        url = await _resolve_flex_media(segment, key, chain, localized, uploaded)
+        if not url:
+            logger.warning(
+                "[LINE] flex media %r unavailable, message degraded to alt text.", key
+            )
+            return _flex_alt_text_message(segment)
+        resolved[key] = url
+
+    return segment.to_line_dict(_substitute_flex_media(segment.contents, resolved))
+
+
+def _collect_flex_media_refs(node: object) -> set[str]:
+    """递归收集 contents 里所有媒体占位符的 key。
+
+    不做字段白名单：Flex 结构由插件负责，image.url / icon.url / video.previewUrl /
+    carousel 与 box 的 contents 数组都可能出现占位符，按位置枚举必然漏。
+    """
+    if isinstance(node, dict):
+        keys: set[str] = set()
+        for value in node.values():
+            keys |= _collect_flex_media_refs(value)
+        return keys
+    if isinstance(node, list):
+        keys = set()
+        for value in node:
+            keys |= _collect_flex_media_refs(value)
+        return keys
+    key = LineFlex.parse_ref(node)
+    return {key} if key else set()
+
+
+async def _resolve_flex_media(
+    segment: LineFlex,
+    key: str,
+    chain: list[str] | None,
+    localized: dict[int, str | None],
+    uploaded: dict[str, str | None],
+) -> str | None:
+    """把 media[key] 物化、按 profile 收敛、上传，返回公网 URL；任一步失败返回 None。
+
+    Args:
+        segment: 待转换的 Flex 组件。
+        key: media 映射里的键。
+        chain: 图床后端 id 优先链。
+        localized: 本次转换内的物化缓存（按 Image 对象身份）。
+        uploaded: 本次转换内的上传缓存（按收敛产物路径）。
+    """
+    entry = segment.media.get(key)
+    if entry is None:
+        logger.warning("[LINE] flex references media %r but it is not provided.", key)
+        return None
+
+    if isinstance(entry, LineFlexMedia):
+        media, profile = entry.media, entry.profile
+    else:
+        media, profile = entry, "image"
+    if not isinstance(media, Image):
+        logger.warning(
+            "[LINE] flex media %r is not an Image component: %r", key, type(media)
+        )
+        return None
+
+    if id(media) not in localized:
+        localized[id(media)] = await _localize_image(
+            (media.url or media.file or "").strip()
+        )
+    local_path = localized[id(media)]
+    if not local_path:
+        return None
+
+    prepared = await prepare_flex_media(local_path, profile)
+    if not prepared:
+        return None
+
+    if prepared not in uploaded:
+        uploaded[prepared] = await resolve_public_media_url(prepared, chain)
+    return uploaded[prepared]
+
+
+def _substitute_flex_media(node: object, resolved: dict[str, str]) -> Any:
+    """深拷贝 contents，把占位符字符串替换成 URL。原 contents 不被改写。"""
+    if isinstance(node, dict):
+        return {k: _substitute_flex_media(v, resolved) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_substitute_flex_media(v, resolved) for v in node]
+    key = LineFlex.parse_ref(node)
+    if key and key in resolved:
+        return resolved[key]
+    return node
+
+
+def _flex_alt_text_message(segment: LineFlex) -> dict[str, Any] | None:
+    """Flex 的降级形态：把 alt_text 作为普通文本消息发出；alt_text 为空则跳过。"""
+    text = truncate_utf16(segment.alt_text.strip(), LINE_TEXT_MAX_UTF16)
+    if not text:
+        logger.warning("[LINE] flex has no alt text to degrade to, component skipped.")
+        return None
+    return {"type": "text", "text": text}
 
 
 # ---------------------------------------------------------------- 媒体组件

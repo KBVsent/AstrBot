@@ -10,7 +10,8 @@
 - Postback：走 raw_message（无消息组件），且显式禁止默认 LLM。
 - 媒体：外链音频依赖 Record.duration；图床 URL 不被适配器校验，而自己拼的兜底 URL 要查
   HTTPS；MediaResolver(max_bytes=...) 能中止超限下载。
-- Flex / 原始消息对象原样透传。
+- Flex / 原始消息对象原样透传；Flex 里的媒体占位符按 profile 收敛后替换成公网 URL，
+  拿不到 URL 就整条降级为 alt_text，而 LineRawMessage 永不做媒体解析。
 """
 
 import asyncio
@@ -19,6 +20,7 @@ import hmac
 import json
 import time
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,7 @@ from astrbot.core.message.components import Image
 from astrbot.core.platform.sources.line import line_media
 from astrbot.core.platform.sources.line.components import (
     LineFlex,
+    LineFlexMedia,
     LinePostbackAction,
     LineQuickReply,
     LineQuickReplyItem,
@@ -596,6 +599,272 @@ async def test_outbound_file_component_is_skipped():
         MessageChain(chain=[Plain("here"), File(name="a.pdf", file="/tmp/a.pdf")])
     )
     assert [m["type"] for m in batch.messages] == ["text"]
+
+
+# --------------------------------------------------------------- Flex 媒体
+
+
+def _write_png(path, size: tuple[int, int]):
+    """在 path 写一张指定尺寸的 PNG，返回该路径。"""
+    from PIL import Image as PILImage
+
+    PILImage.new("RGB", size, (30, 144, 255)).save(path, "PNG")
+    return path
+
+
+@pytest.fixture
+def flex_media_env(tmp_path, monkeypatch):
+    """把 Flex 媒体路径的落盘与上传都收进 tmp_path，并记录每次上传。
+
+    只替换上传这一层：物化、转码、尺寸收敛都跑真实实现 —— 这些正是要测的东西。
+    """
+    from astrbot.core.platform.sources.line import line_event
+    from astrbot.core.utils import media_utils
+
+    monkeypatch.setattr(line_media, "get_astrbot_temp_path", lambda: str(tmp_path))
+    monkeypatch.setattr(media_utils, "get_astrbot_temp_path", lambda: str(tmp_path))
+
+    uploads: list[str] = []
+
+    async def fake_upload(path, chain, *, mime_type=None):
+        uploads.append(path)
+        return f"https://cdn.example.com/{Path(path).name}"
+
+    monkeypatch.setattr(line_event, "resolve_public_media_url", fake_upload)
+    return uploads
+
+
+@pytest.mark.asyncio
+async def test_flex_media_refs_are_replaced_with_public_urls(tmp_path, flex_media_env):
+    """占位符按整串精确匹配替换；普通字符串、未被引用的 key、原 contents 都不受影响。"""
+    image = Image.fromFileSystem(_write_png(tmp_path / "a.png", (400, 300)))
+    contents = {
+        "type": "bubble",
+        "hero": {"type": "image", "url": LineFlex.ref("hero")},
+        "body": {
+            "type": "box",
+            "layout": "baseline",
+            "contents": [
+                {"type": "icon", "url": LineFlex.ref("badge")},
+                {"type": "text", "text": "astrbot-media://hero is a literal here"},
+                {"type": "text", "text": "https://example.com/keep.png"},
+            ],
+        },
+    }
+    flex = LineFlex(
+        alt_text="B50",
+        media={
+            "hero": image,
+            "badge": LineFlexMedia(media=image, profile="icon"),
+            "unused": Image.fromFileSystem(_write_png(tmp_path / "b.png", (10, 10))),
+        },
+        contents=contents,
+    )
+
+    batch = await build_line_batch(MessageChain(chain=[flex]), ["r2"])
+    body = batch.messages[0]["contents"]["body"]["contents"]
+
+    assert batch.messages[0]["contents"]["hero"]["url"].startswith("https://cdn.")
+    assert body[0]["url"].startswith("https://cdn.")
+    # 占位符出现在长字符串里只是普通文本，不做子串替换。
+    assert body[1]["text"] == "astrbot-media://hero is a literal here"
+    assert body[2]["text"] == "https://example.com/keep.png"
+    # 原 contents 不被改写：同一个组件二次发送不会拿到上一次的 URL。
+    assert contents["hero"]["url"] == LineFlex.ref("hero")
+    # 未被引用的 key 不物化、不上传。
+    assert not any("b.png" in path for path in flex_media_env)
+
+
+def test_flex_media_key_charset_is_enforced():
+    """占位符必须整串可判定：非法 key 永远匹配不上，构造时就得报错而不是发出去。"""
+    assert LineFlex.parse_ref(LineFlex.ref("hero_1-a")) == "hero_1-a"
+    assert LineFlex.parse_ref("astrbot-media://hero is prose") is None
+    assert LineFlex.parse_ref("astrbot-media://") is None
+    assert LineFlex.parse_ref("https://example.com/a.png") is None
+    assert LineFlex.parse_ref(42) is None
+    with pytest.raises(ValueError):
+        LineFlex.ref("hero image")
+
+
+@pytest.mark.asyncio
+async def test_flex_media_profiles_converge_to_line_limits(tmp_path, monkeypatch):
+    """image / icon 有 1024×1024 px 硬上限（普通 image 消息没有），original 不受约束。
+
+    超限同样是整批 400，因此「已经是 PNG 且不大」还不足以短路，尺寸也得在范围内。
+    """
+    from PIL import Image as PILImage
+
+    monkeypatch.setattr(line_media, "get_astrbot_temp_path", lambda: str(tmp_path))
+    oversized = str(_write_png(tmp_path / "big.png", (2000, 1200)))
+
+    for profile, max_edge in (("image", 1024), ("icon", 512)):
+        prepared = await line_media.prepare_flex_media(oversized, profile)
+        assert prepared is not None
+        with PILImage.open(prepared) as opened:
+            assert max(opened.size) <= max_edge
+        assert (
+            line_media.detect_file_mime_type(prepared)
+            in line_media.LINE_IMAGE_MIME_TYPES
+        )
+
+    # original 只被 uri action 打开、不由 LINE 渲染，因此原样返回，不转码不缩放。
+    assert await line_media.prepare_flex_media(oversized, "original") == oversized
+    # 未知 profile 不猜默认值：跳过，避免把不合规的对象放进批次。
+    assert await line_media.prepare_flex_media(oversized, "bogus") is None
+    assert (
+        await line_media.prepare_flex_media(str(tmp_path / "nope.png"), "image") is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_flex_original_profile_serves_the_full_size_image(
+    tmp_path, flex_media_env
+):
+    """「Flex 里看缩略版、点开看原图」：两个 profile 产出两个不同的 URL。"""
+    image = Image.fromFileSystem(_write_png(tmp_path / "big.png", (2000, 1200)))
+    flex = LineFlex(
+        alt_text="B50",
+        media={"hero": image, "full": LineFlexMedia(media=image, profile="original")},
+        contents={
+            "type": "bubble",
+            "hero": {
+                "type": "image",
+                "url": LineFlex.ref("hero"),
+                "action": {"type": "uri", "uri": LineFlex.ref("full")},
+            },
+        },
+    )
+
+    batch = await build_line_batch(MessageChain(chain=[flex]), None)
+    hero = batch.messages[0]["contents"]["hero"]
+    assert hero["url"] != hero["action"]["uri"]
+    assert hero["action"]["uri"].endswith("/big.png")  # 原图原样上传
+    assert len(flex_media_env) == 2
+
+
+@pytest.mark.asyncio
+async def test_flex_media_is_localized_and_uploaded_once_per_rendition(
+    tmp_path, flex_media_env, monkeypatch
+):
+    """同一张图被多个 key 引用时只物化一次；两个 profile 落到同一文件时只上传一次。"""
+    from astrbot.core.platform.sources.line import line_event
+
+    localized: list[str] = []
+    real_localize = line_event._localize_image
+
+    async def spy_localize(media_ref: str):
+        localized.append(media_ref)
+        return await real_localize(media_ref)
+
+    monkeypatch.setattr(line_event, "_localize_image", spy_localize)
+
+    # 800×600 已在 1024 以内且是 PNG，image 与 original 都短路返回同一路径。
+    image = Image.fromFileSystem(_write_png(tmp_path / "small.png", (800, 600)))
+    flex = LineFlex(
+        alt_text="B50",
+        media={
+            "a": image,
+            "b": image,
+            "full": LineFlexMedia(media=image, profile="original"),
+        },
+        contents={
+            "type": "bubble",
+            "hero": {
+                "type": "image",
+                "url": LineFlex.ref("a"),
+                "action": {"type": "uri", "uri": LineFlex.ref("full")},
+            },
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [{"type": "image", "url": LineFlex.ref("b")}],
+            },
+        },
+    )
+
+    batch = await build_line_batch(MessageChain(chain=[flex]), None)
+    contents = batch.messages[0]["contents"]
+    assert len(localized) == 1
+    assert len(flex_media_env) == 1
+    # 一次上传，三处复用同一 URL。
+    urls = {
+        contents["hero"]["url"],
+        contents["hero"]["action"]["uri"],
+        contents["body"]["contents"][0]["url"],
+    }
+    assert len(urls) == 1
+
+
+@pytest.mark.asyncio
+async def test_flex_degrades_to_alt_text_when_media_is_unavailable(
+    tmp_path, monkeypatch
+):
+    """缺图的半成品 Flex 会让整批 400，因此整条降级为 alt_text —— 那正是它的用途。"""
+    from astrbot.core.platform.sources.line import line_event
+
+    monkeypatch.setattr(line_media, "get_astrbot_temp_path", lambda: str(tmp_path))
+
+    async def no_url(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(line_event, "resolve_public_media_url", no_url)
+    image = Image.fromFileSystem(_write_png(tmp_path / "a.png", (400, 300)))
+    contents = {
+        "type": "bubble",
+        "hero": {"type": "image", "url": LineFlex.ref("hero")},
+    }
+
+    batch = await build_line_batch(
+        MessageChain(
+            chain=[LineFlex(alt_text="B50", media={"hero": image}, contents=contents)]
+        )
+    )
+    assert batch.messages == [{"type": "text", "text": "B50"}]
+
+    # alt_text 为空则连降级形态都没有，整个组件跳过。
+    empty_alt = await build_line_batch(
+        MessageChain(
+            chain=[LineFlex(alt_text="", media={"hero": image}, contents=contents)]
+        )
+    )
+    assert empty_alt.messages == []
+
+
+@pytest.mark.asyncio
+async def test_flex_with_unresolvable_media_entry_degrades(tmp_path, flex_media_env):
+    """引用了不存在的 key、或 media 里放的不是 Image：都不允许把占位符发出去。"""
+    contents = {
+        "type": "bubble",
+        "hero": {"type": "image", "url": LineFlex.ref("hero")},
+    }
+
+    missing = await build_line_batch(
+        MessageChain(chain=[LineFlex(alt_text="missing", contents=contents)])
+    )
+    assert missing.messages == [{"type": "text", "text": "missing"}]
+
+    wrong_type = await build_line_batch(
+        MessageChain(
+            chain=[
+                LineFlex(
+                    alt_text="wrong",
+                    media={"hero": "https://example.com/a.png"},
+                    contents=contents,
+                )
+            ]
+        )
+    )
+    assert wrong_type.messages == [{"type": "text", "text": "wrong"}]
+    assert flex_media_env == []
+
+
+@pytest.mark.asyncio
+async def test_raw_message_media_refs_are_not_resolved(tmp_path, flex_media_env):
+    """LineRawMessage 是逃生口：严格原样透传，不做任何媒体解析。"""
+    raw = {"type": "image", "originalContentUrl": LineFlex.ref("hero")}
+    batch = await build_line_batch(MessageChain(chain=[LineRawMessage(message=raw)]))
+    assert batch.messages == [raw]
+    assert flex_media_env == []
 
 
 # --------------------------------------------------------------- send_typing

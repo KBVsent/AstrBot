@@ -17,8 +17,9 @@ Action 的可用位置由 LINE 规定，spec 表达不了：camera / cameraRoll 
 
 from __future__ import annotations
 
+import re
 import sys
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from astrbot.api import logger
 from astrbot.core.message.components import BaseMessageComponent
@@ -173,22 +174,128 @@ class LineQuickReply(BaseMessageComponent):
         return {"items": items}
 
 
+class LineFlexMedia(BaseModel):
+    """Flex 里的一处媒体引用：由适配器负责物化、转码、尺寸收敛、上传、出公网 URL。
+
+    Attributes:
+        media: 标准 AstrBot Image 组件，来源不限（base64 / 本地路径 / 外链 / data URI）。
+        profile: 目标位置的规格。
+            image —— image 组件与 hero，收敛到 JPEG/PNG + 1024×1024 px 以内；
+            icon —— icon 组件，另外压到更小的 payload；
+            original —— 不转码、不缩放，产出的 URL 供 uri action 打开（客户端浏览器里
+            看原图，不由 LINE 渲染，因此不受 Flex 的格式与像素约束）。
+    """
+
+    # 声明为 Any 而非 Image：与 LineQuickReplyItem.action 同样的理由 ——
+    # pydantic v1 会按声明类型重新校验/复制字段，这里改为在转换时做 isinstance 检查。
+    media: Any
+    profile: Literal["image", "icon", "original"] = "image"
+
+    class Config:
+        arbitrary_types_allowed = True
+
+
 class LineFlex(BaseMessageComponent):
     """Flex Message（实体组件）。
 
     contents 是 Flex 的 JSON 树，其结构正确性由插件负责 —— 适配器不校验、不改写，
     LINE 拒绝时会在日志里保留完整错误。
+
+    需要发送非公网可达的图片（base64、本地文件、需要转码的外链）时，把 Image 放进
+    media 映射，并在 contents 里用 LineFlex.ref(key) 占位；适配器在进入 LINE API 前
+    把占位符替换成公网 URL。媒体对象不放进 contents，因此 contents 始终是可
+    json.dumps 的纯 JSON —— 出错时能直接对照 LINE 的报错读 payload。
+
+    Example:
+        LineFlex(
+            alt_text="Best 50",
+            media={"hero": Comp.Image.fromBase64(png_b64)},
+            contents={
+                "type": "bubble",
+                "hero": {"type": "image", "url": LineFlex.ref("hero"), "size": "full"},
+            },
+        )
+
+    Flex 里的图受 1024×1024 px 硬限制，长图会被压得看不清。让用户点开看原图：同一张
+    Image 挂两个 key，一个走默认 profile 进 hero，一个走 original 给 uri action。两个
+    版本落到同一个文件时（源图本来就在 1024 以内）只会上传一次。
+
+    Example:
+        img = Comp.Image.fromBase64(png_b64)
+        LineFlex(
+            alt_text="Best 50",
+            media={"hero": img, "full": LineFlexMedia(media=img, profile="original")},
+            contents={
+                "type": "bubble",
+                "hero": {
+                    "type": "image",
+                    "url": LineFlex.ref("hero"),
+                    "size": "full",
+                    "action": {"type": "uri", "uri": LineFlex.ref("full")},
+                },
+            },
+        )
+
+    Attributes:
+        alt_text: 无法渲染 Flex 时显示的文本。媒体解析失败时整条 Flex 会降级为它。
+        contents: Flex JSON 树。
+        media: key -> Image | LineFlexMedia。只有被 contents 引用到的 key 才会被处理。
     """
 
     type: str = "line_flex"  # type: ignore[assignment]
     alt_text: str
     contents: dict[str, Any]
+    media: dict[str, Any] = {}
 
-    def to_line_dict(self) -> dict[str, Any]:
+    MEDIA_SCHEME: ClassVar[str] = "astrbot-media://"
+    MEDIA_KEY_PATTERN: ClassVar[re.Pattern] = re.compile(r"[A-Za-z0-9_-]+")
+    """key 的合法字符集。
+
+    限制字符集是为了让「整串是占位符」可判定：只按前缀判断的话，正文里一句恰好以
+    astrbot-media:// 开头的文本会被误认成引用，然后因为查不到 key 而让整条 Flex 降级。
+    """
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    @classmethod
+    def ref(cls, key: str) -> str:
+        """生成 contents 里的媒体占位符字符串。
+
+        Args:
+            key: media 映射里的键，只能由字母、数字、下划线、连字符组成。
+
+        Returns:
+            形如 "astrbot-media://hero" 的占位符；替换时按整个字符串精确匹配。
+
+        Raises:
+            ValueError: key 含非法字符。这种 key 永远匹配不上，静默产出一个不会被替换的
+                占位符只会让 LINE 拒掉整批消息，不如在构造时就报错。
+        """
+        if not cls.MEDIA_KEY_PATTERN.fullmatch(key):
+            raise ValueError(
+                f"flex media key must match {cls.MEDIA_KEY_PATTERN.pattern}: {key!r}"
+            )
+        return f"{cls.MEDIA_SCHEME}{key}"
+
+    @classmethod
+    def parse_ref(cls, value: object) -> str | None:
+        """整串是占位符时返回其 key，否则返回 None（普通 URL 与正文字符串走这条）。"""
+        if not isinstance(value, str) or not value.startswith(cls.MEDIA_SCHEME):
+            return None
+        key = value[len(cls.MEDIA_SCHEME) :]
+        return key if cls.MEDIA_KEY_PATTERN.fullmatch(key) else None
+
+    def to_line_dict(self, contents: dict[str, Any] | None = None) -> dict[str, Any]:
+        """产出 flex 消息对象。
+
+        Args:
+            contents: 已完成媒体替换的 JSON 树；None 表示原样使用 self.contents。
+        """
         return {
             "type": "flex",
             "altText": self.alt_text,
-            "contents": self.contents,
+            "contents": self.contents if contents is None else contents,
         }
 
 

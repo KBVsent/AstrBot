@@ -42,6 +42,29 @@ LINE_MAX_VIDEO_BYTES = 200 * 1024 * 1024
 LINE_MAX_AUDIO_BYTES = 200 * 1024 * 1024
 LINE_MAX_URL_LENGTH = 2000
 
+# Flex 内的图片是另一套规格：除了 JPEG/PNG 与字节上限，还有 1024×1024 px 的像素硬上限
+# （普通 image 消息没有这一条）。超限同样是整批 400，因此必须在进入批次前收敛。
+LINE_MAX_FLEX_IMAGE_BYTES = 10 * 1024 * 1024
+LINE_MAX_FLEX_IMAGE_EDGE = 1024
+
+# icon 的协议上限与 image 相同，但它在客户端渲染尺寸极小（size 属性最大也只是几十 px），
+# 这两个值是本地取的更保守值，纯为压 payload、避免官方「单图 ≤1 MB 才不延迟渲染」的建议线。
+LINE_MAX_FLEX_ICON_BYTES = 1 * 1024 * 1024
+LINE_MAX_FLEX_ICON_EDGE = 512
+
+FLEX_MEDIA_PROFILES: dict[str, tuple[int, int]] = {
+    "image": (LINE_MAX_FLEX_IMAGE_BYTES, LINE_MAX_FLEX_IMAGE_EDGE),
+    "icon": (LINE_MAX_FLEX_ICON_BYTES, LINE_MAX_FLEX_ICON_EDGE),
+}
+"""profile -> (字节上限, 最长边像素上限)。"""
+
+FLEX_ORIGINAL_PROFILE = "original"
+"""不转码、不收敛的 profile：产出的 URL 只给 uri action 打开，不由 LINE 渲染。
+
+用途是「Flex 里看 1024 的缩略版，点开看原图」。它不在 FLEX_MEDIA_PROFILES 里，因为
+它恰恰是「没有预算」—— 唯一的约束来自 OUTBOUND_UPLOAD_LIMIT（进图床的本地上限）。
+"""
+
 LINE_IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png"})
 LINE_AUDIO_MIME_TYPES = frozenset({"audio/mpeg", "audio/mp4"})
 LINE_VIDEO_MIME_TYPES = frozenset({"video/mp4"})
@@ -303,6 +326,92 @@ async def prepare_line_preview(path: str) -> str | None:
         )
         return None
     return _verify_prepared(converted, LINE_IMAGE_MIME_TYPES, LINE_MAX_PREVIEW_BYTES)
+
+
+def _image_dimensions(path: str | Path) -> tuple[int, int] | None:
+    """读图片像素尺寸（只解析文件头，不解码整张图）；失败返回 None。"""
+    try:
+        with PILImage.open(path) as opened:
+            return opened.size
+    except Exception as e:
+        logger.debug("[LINE] read image dimensions failed: %s (%s)", path, e)
+        return None
+
+
+async def prepare_flex_media(path: str, profile: str) -> str | None:
+    """把本地图片收敛为 Flex 内某个位置可接受的图（JPEG/PNG + 字节上限 + 像素上限）。
+
+    与 prepare_line_image 的区别只在多了像素上限：Flex 的 image / icon 有 1024×1024 px
+    硬限制，因此「已经是 JPEG 且不大」还不足以短路，尺寸也得在范围内。
+
+    profile="original" 是例外：它产出的 URL 只被 uri action 打开（在客户端浏览器里看），
+    不由 LINE 渲染，因此不受 Flex 的格式与像素约束，原样返回不转码 —— 点开看到的就是
+    插件给的那张图，动图也还是动图。
+
+    Args:
+        path: 本地图片路径。
+        profile: FLEX_MEDIA_PROFILES 的键（image / icon），或 "original"。
+
+    Returns:
+        可用于 Flex 的本地图片路径，或收敛失败时 None。
+    """
+    if profile == FLEX_ORIGINAL_PROFILE:
+        if file_size(path) < 0:
+            logger.warning("[LINE] flex media not readable, skipped: %s", path)
+            return None
+        return path
+
+    budget = FLEX_MEDIA_PROFILES.get(profile)
+    if budget is None:
+        logger.warning(
+            "[LINE] unknown flex media profile %r, skipped: %s", profile, path
+        )
+        return None
+    max_bytes, max_edge = budget
+
+    size = file_size(path)
+    if size < 0:
+        logger.warning("[LINE] flex media not readable, skipped: %s", path)
+        return None
+    mime = await detect_file_mime_type_async(path)
+    dimensions = await asyncio.to_thread(_image_dimensions, path)
+    if (
+        mime in LINE_IMAGE_MIME_TYPES
+        and size <= max_bytes
+        and dimensions is not None
+        and max(dimensions) <= max_edge
+    ):
+        return path
+
+    try:
+        converted = await asyncio.to_thread(
+            _encode_image_within_budget, Path(path), max_bytes, max_edge
+        )
+    except Exception as e:
+        logger.warning("[LINE] flex media convert failed, skipped: %s (%s)", path, e)
+        return None
+    if not converted:
+        logger.warning(
+            "[LINE] flex media cannot be reduced under %s bytes / %s px, skipped: %s",
+            max_bytes,
+            max_edge,
+            path,
+        )
+        return None
+    verified = _verify_prepared(converted, LINE_IMAGE_MIME_TYPES, max_bytes)
+    if not verified:
+        return None
+    # 像素上限也要实测：字节数达标但尺寸超标同样是整批 400。
+    converted_dimensions = await asyncio.to_thread(_image_dimensions, verified)
+    if converted_dimensions is None or max(converted_dimensions) > max_edge:
+        logger.warning(
+            "[LINE] converted flex media still exceeds %s px (size=%s), skipped: %s",
+            max_edge,
+            converted_dimensions,
+            verified,
+        )
+        return None
+    return verified
 
 
 # ---------------------------------------------------------------- 音视频收敛
