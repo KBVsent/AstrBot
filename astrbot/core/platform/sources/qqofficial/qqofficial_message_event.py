@@ -810,6 +810,9 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         raw = getattr(self.message_obj, "raw_message", None)
         return isinstance(raw, botpy.interaction.Interaction)
 
+    def is_callback_event(self) -> bool:
+        return self.is_button_interaction()
+
     def get_message_outline(self) -> str:
         """interaction 事件没有消息链，构造按钮摘要供日志使用。"""
         if not self.is_button_interaction():

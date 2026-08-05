@@ -473,6 +473,9 @@ class DiscordPlatformEvent(AstrMessageEvent):
             == discord.InteractionType.component
         )
 
+    def is_callback_event(self) -> bool:
+        return self.is_button_interaction()
+
     def is_user_install_context(self) -> bool:
         """判断当前交互是否为「个人安装(User Install)」上下文。
 

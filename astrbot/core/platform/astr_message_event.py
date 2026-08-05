@@ -298,6 +298,10 @@ class AstrMessageEvent(abc.ABC):
         )
         self._has_send_oper = True
 
+    def is_callback_event(self) -> bool:
+        """本事件是否来自交互回调（按钮点击等），而不是用户主动发的消息"""
+        return False
+
     async def send_typing(self) -> None:
         """发送输入中状态。
 

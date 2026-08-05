@@ -932,18 +932,81 @@ async def test_send_typing_uses_configured_seconds(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_typing_ignores_the_pre_ack_switch(monkeypatch):
+    """send_typing() 不看 pre_ack_loading.enable —— 它另有调用方（LLM 子阶段）。
+
+    这里的 astrbot_config 还是默认配置档，非默认档用户的设置读不到；拿它当闸门会
+    把 LLM 那条路一起掐掉（曾经发生过）。
+    """
+    import astrbot.core.platform.sources.line.line_event as line_event
+
+    adapter = make_adapter()
+    calls: list[tuple] = []
+
+    async def fake_loading(chat_id: str, seconds: int) -> bool:
+        calls.append((chat_id, seconds))
+        return True
+
+    adapter.line_api.show_loading_animation = fake_loading  # type: ignore[method-assign]
+    direct = await adapter.convert_message(text_event("e1"))
+    assert direct is not None
+
+    monkeypatch.setitem(
+        line_event.astrbot_config,
+        "platform_specific",
+        {"line": {"pre_ack_loading": {"enable": False, "seconds": 30}}},
+    )
+    await adapter.create_event(direct).send_typing()
+    assert calls == [("U1", 30)]
+
+    # 配置整段缺失也照发，seconds 退回默认值
+    monkeypatch.setitem(line_event.astrbot_config, "platform_specific", {})
+    await adapter.create_event(direct).send_typing()
+    assert calls == [("U1", 30), ("U1", 20)]
+
+
+@pytest.mark.asyncio
+async def test_postback_event_is_a_callback_event():
+    """postback 要被识别成交互回调，自动预回应据此跳过它。"""
+    adapter = make_adapter()
+
+    message = await adapter.convert_message(text_event("e1"))
+    assert message is not None
+    assert adapter.create_event(message).is_callback_event() is False
+
+    postback = await adapter.convert_message(
+        {
+            "type": "postback",
+            "webhookEventId": "p1",
+            "replyToken": "reply-token",
+            "timestamp": 1,
+            "source": {"type": "user", "userId": "U1"},
+            "postback": {"data": "prefill"},
+        }
+    )
+    assert postback is not None
+    event = adapter.create_event(postback)
+    assert event.is_postback() is True
+    assert event.is_callback_event() is True
+
+
+@pytest.mark.asyncio
 async def test_preprocess_stage_pre_ack_loading_is_opt_in():
-    """预回应加载动画默认关闭；开启后仅对 line 且明确唤醒的事件触发。"""
+    """预回应加载动画默认关闭；开启后仅对 line、明确唤醒、且非交互回调的事件触发。"""
     from astrbot.core.pipeline.preprocess_stage.stage import PreProcessStage
 
     class FakeEvent:
-        def __init__(self, platform: str, woken: bool) -> None:
+        def __init__(self, platform: str, woken: bool, callback: bool = False) -> None:
             self.platform = platform
             self.is_at_or_wake_command = woken
+            self.callback = callback
             self.typing = 0
 
         def get_platform_name(self) -> str:
             return self.platform
+
+        def is_callback_event(self) -> bool:
+            return self.callback
 
         async def send_typing(self) -> None:
             self.typing += 1
@@ -979,6 +1042,13 @@ async def test_preprocess_stage_pre_ack_loading_is_opt_in():
     off = FakeEvent("line", True)
     await run(disabled, off)
     assert off.typing == 0
+
+    # 交互回调（postback）不自动 ack：里面有纯 UI 动作（如 openKeyboard 预填项），
+    # 而 LINE 的动画无法提前结束，发出去就是一段没有下文的假状态。要 ack 的按钮由
+    # 插件在自己的回调分支里调 send_typing()。
+    callback = FakeEvent("line", True, callback=True)
+    await run(enabled, callback)
+    assert callback.typing == 0
 
     # 其它平台不受这个开关影响（WebChat 把 send_typing 用作 LLM run 信号）。
     other = FakeEvent("webchat", True)

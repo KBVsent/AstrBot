@@ -85,6 +85,7 @@ class PreProcessStage(Stage):
             loading_cfg.get("enable", False)
             and platform in loading_supported
             and event.is_at_or_wake_command
+            and not event.is_callback_event()
         ):
             try:
                 await event.send_typing()

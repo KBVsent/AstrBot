@@ -719,6 +719,9 @@ class LineMessageEvent(AstrMessageEvent):
         raw = self.message_obj.raw_message
         return isinstance(raw, dict) and str(raw.get("type", "")) == "postback"
 
+    def is_callback_event(self) -> bool:
+        return self.is_postback()
+
     def _postback_payload(self) -> dict[str, Any]:
         raw = self.message_obj.raw_message
         if not isinstance(raw, dict):
@@ -744,6 +747,7 @@ class LineMessageEvent(AstrMessageEvent):
 
         仅 1:1 聊天可用 —— LINE 的 chatId 只接受用户 ID，官方明确不能指定群聊或
         多人聊天，因此非 1:1 场景不发起请求、不产生错误。
+
         """
         if self.message_obj.type != MessageType.FRIEND_MESSAGE:
             logger.debug("[LINE] loading animation skipped for non 1:1 chat.")
