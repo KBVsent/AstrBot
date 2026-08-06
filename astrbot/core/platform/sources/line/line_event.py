@@ -41,7 +41,6 @@ from .line_media import (
     prepare_flex_media,
     prepare_line_audio,
     prepare_line_image,
-    prepare_line_preview,
     prepare_line_video,
     resolve_audio_duration,
     resolve_public_media_url,
@@ -390,7 +389,10 @@ def _flex_alt_text_message(segment: LineFlex) -> dict[str, Any] | None:
 async def _image_to_message(
     segment: Image, chain: list[str] | None
 ) -> dict[str, Any] | None:
-    """图片：外链也要下载后走与本地相同的收敛流程，original / preview 分别供给 URL。"""
+    """图片：外链也要下载后走与本地相同的收敛流程，原图 URL 同时充当预览图。
+
+    LINE 文档给 previewImageUrl 标了 1 MB 上限，但实际上只是摆设
+    """
     local_path = await _localize_image((segment.url or segment.file or "").strip())
     if not local_path:
         return None
@@ -398,26 +400,16 @@ async def _image_to_message(
     original_path = await prepare_line_image(local_path)
     if not original_path:
         return None
-    preview_path = await prepare_line_preview(original_path)
-    if not preview_path:
-        return None
 
-    original_url = await resolve_public_media_url(original_path, chain)
-    if not original_url:
+    url = await resolve_public_media_url(original_path, chain)
+    if not url:
         logger.warning("[LINE] no usable URL for image, component skipped.")
-        return None
-    if preview_path == original_path:
-        preview_url = original_url
-    else:
-        preview_url = await resolve_public_media_url(preview_path, chain)
-    if not preview_url:
-        logger.warning("[LINE] no usable URL for image preview, component skipped.")
         return None
 
     return {
         "type": "image",
-        "originalContentUrl": original_url,
-        "previewImageUrl": preview_url,
+        "originalContentUrl": url,
+        "previewImageUrl": url,
     }
 
 
@@ -425,7 +417,7 @@ async def _localize_image(media_ref: str) -> str | None:
     """把图片引用落成本地文件；失败即跳过，不直用外链。
 
     外链图片交给公共 MediaResolver 物化，并给它一个字节上限：外链 GIF/WebP 会被 LINE
-    拒绝，而 Image 又没有独立的 preview 源，不下载根本造不出预览图。
+    拒绝而导致整批 400，而格式只有下载下来才能确认。
 
     Args:
         media_ref: 图片引用（本地路径、file:// URI、HTTP(S) URL、base64 等）。
@@ -563,14 +555,17 @@ async def _video_to_message(
 
 
 async def _cover_to_url(cover_source: str, chain: list[str] | None) -> str | None:
-    """视频封面按图片规则处理：外链先受限下载，再收敛到 ≤ 1 MB 的 JPEG/PNG。"""
+    """视频封面按图片规则处理：外链先受限下载，再收敛成合法 JPEG/PNG。
+
+    只保证格式与 10 MB 上限
+    """
     local_path = await _localize_image(cover_source)
     if not local_path:
         return None
-    preview_path = await prepare_line_preview(local_path)
-    if not preview_path:
+    cover_path = await prepare_line_image(local_path)
+    if not cover_path:
         return None
-    return await resolve_public_media_url(preview_path, chain)
+    return await resolve_public_media_url(cover_path, chain)
 
 
 # ---------------------------------------------------------------- 批次收尾

@@ -37,7 +37,6 @@ from astrbot.core.utils.media_utils import (
 
 # —— 平台合法性（RUNTIME_CONSTRAINTS §6）——
 LINE_MAX_IMAGE_BYTES = 10 * 1024 * 1024
-LINE_MAX_PREVIEW_BYTES = 1 * 1024 * 1024
 LINE_MAX_VIDEO_BYTES = 200 * 1024 * 1024
 LINE_MAX_AUDIO_BYTES = 200 * 1024 * 1024
 LINE_MAX_URL_LENGTH = 2000
@@ -292,42 +291,6 @@ async def prepare_line_image(path: str) -> str | None:
     return _verify_prepared(converted, LINE_IMAGE_MIME_TYPES, LINE_MAX_IMAGE_BYTES)
 
 
-async def prepare_line_preview(path: str) -> str | None:
-    """由本地图片生成 LINE 预览图（JPEG/PNG 且 ≤ 1 MB，保持宽高比）。
-
-    宽高比必须与原图/视频一致：不一致时客户端里预览图会露在视频后面。
-
-    Args:
-        path: 本地图片路径（原图或视频封面）。
-
-    Returns:
-        预览图本地路径，或收敛失败时 None。
-    """
-    mime = await detect_file_mime_type_async(path)
-    size = file_size(path)
-    if size < 0:
-        logger.warning("[LINE] preview source not readable, skipped: %s", path)
-        return None
-    if mime in LINE_IMAGE_MIME_TYPES and size <= LINE_MAX_PREVIEW_BYTES:
-        return path
-
-    try:
-        converted = await asyncio.to_thread(
-            _encode_image_within_budget, Path(path), LINE_MAX_PREVIEW_BYTES, 1280
-        )
-    except Exception as e:
-        logger.warning("[LINE] preview convert failed, skipped: %s (%s)", path, e)
-        return None
-    if not converted:
-        logger.warning(
-            "[LINE] preview cannot be reduced under %s bytes, skipped: %s",
-            LINE_MAX_PREVIEW_BYTES,
-            path,
-        )
-        return None
-    return _verify_prepared(converted, LINE_IMAGE_MIME_TYPES, LINE_MAX_PREVIEW_BYTES)
-
-
 def _image_dimensions(path: str | Path) -> tuple[int, int] | None:
     """读图片像素尺寸（只解析文件头，不解码整张图）；失败返回 None。"""
     try:
@@ -516,7 +479,7 @@ async def prepare_line_video(path: str) -> str | None:
 
 
 async def extract_local_video_cover(video_path: str) -> str | None:
-    """为本地视频抽一帧作封面，并收敛为合法预览图；失败返回 None。
+    """为本地视频抽一帧作封面，并收敛为合法图片；失败返回 None。
 
     只用于本地视频 —— 外链视频缺预览图时按规格跳过，不下载抽帧。
 
@@ -531,7 +494,7 @@ async def extract_local_video_cover(video_path: str) -> str | None:
     except Exception as e:
         logger.warning("[LINE] extract video cover failed: %s (%s)", video_path, e)
         return None
-    return await prepare_line_preview(cover)
+    return await prepare_line_image(cover)
 
 
 async def resolve_audio_duration(path: str) -> int | None:
