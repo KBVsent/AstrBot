@@ -15,6 +15,8 @@ import uuid
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
@@ -113,6 +115,22 @@ def _evict_profile_cache(
     while len(cache) > _NICKNAME_CACHE_CAPACITY:
         # 最久未命中的先出（读命中会 move_to_end）。
         cache.popitem(last=False)
+
+
+def _local_media_present(components: list) -> bool:
+    """组件里引用的本地文件是不是都还在。
+
+    只看本地路径：http(s) 与 base64 引用不落盘，没有失效一说。
+    """
+    for comp in components:
+        ref = str(getattr(comp, "path", "") or getattr(comp, "file", "") or "")
+        if not ref or ref.startswith(("http://", "https://", "base64://")):
+            continue
+        if ref.startswith("file://"):
+            ref = url2pathname(urlparse(ref).path)
+        if not Path(ref).exists():
+            return False
+    return True
 
 
 @register_platform_adapter(
@@ -436,6 +454,10 @@ class LinePlatformAdapter(Platform):
     async def _build_reply_component(self, chat_id: str, quoted_id: str) -> Reply:
         """尽力恢复被引用消息的内容：命中缓存或可回查则带内容，否则只留 ID。"""
         cached = self._quote_store.get_content(chat_id, quoted_id)
+        if cached and not _local_media_present(cached):
+            # 图片类组件引用的本地文件已被清理掉，重新下载
+            logger.debug("[LINE] quoted %s cached media is gone, refetching", quoted_id)
+            cached = None
         if cached:
             return Reply(
                 id=quoted_id,
