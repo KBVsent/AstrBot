@@ -12,12 +12,15 @@
   HTTPS；MediaResolver(max_bytes=...) 能中止超限下载。
 - Flex / 原始消息对象原样透传；Flex 里的媒体占位符按 profile 收敛后替换成公网 URL，
   拿不到 URL 就整条降级为 alt_text，而 LineRawMessage 永不做媒体解析。
+- Rich Menu：本地硬约束在发请求前拦截；上传图走 api-data 域的裸二进制；bulk 按 500
+  切片且 202 算成功；「用户未绑定」的 404 不刷 error 日志。
 """
 
 import asyncio
 import base64
 import hmac
 import json
+import logging
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -1199,3 +1202,212 @@ async def test_handle_msg_sets_user_locale_extra():
     await adapter.handle_msg(abm)
     event = adapter.committed_events.get_nowait()
     assert event.get_extra("user_locale") is None
+
+
+# -------------------------------------------------------------- Rich Menu
+
+
+class RecordingSession:
+    """记录每次 request 的替身；按调用顺序返回预置响应。"""
+
+    def __init__(self, responses: list[tuple[int, str]]) -> None:
+        self._responses = list(responses)
+        self.calls: list[dict] = []
+
+    def request(self, method, url, *, json=None, data=None, headers=None):
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "json": json,
+                "data": data,
+                "headers": headers or {},
+            }
+        )
+        status, body = self._responses.pop(0) if self._responses else (200, "{}")
+
+        class FakeResponse:
+            def __init__(self) -> None:
+                self.status = status
+
+            async def text(self):
+                return body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        return FakeResponse()
+
+
+def make_rich_menu_client(
+    monkeypatch, responses: list[tuple[int, str]]
+) -> tuple[LineAPIClient, RecordingSession]:
+    client = LineAPIClient(channel_access_token="t", channel_secret="s")
+    session = RecordingSession(responses)
+    monkeypatch.setattr(client, "_get_session", lambda: _async_value(session))
+    return client, session
+
+
+def minimal_rich_menu(**overrides) -> dict:
+    menu = {
+        "size": {"width": 2500, "height": 1686},
+        "selected": True,
+        "name": "menu",
+        "chatBarText": "Menu",
+        "areas": [],
+    }
+    menu.update(overrides)
+    return menu
+
+
+@pytest.mark.asyncio
+async def test_create_rich_menu_returns_id(monkeypatch):
+    client, session = make_rich_menu_client(
+        monkeypatch, [(200, json.dumps({"richMenuId": "rm-1"}))]
+    )
+
+    assert await client.create_rich_menu(minimal_rich_menu()) == "rm-1"
+    call = session.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"].endswith("/v2/bot/richmenu")
+    assert call["headers"]["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_rich_menu_local_validation_blocks_request(monkeypatch):
+    """本地就能判死的对象不许发出去：reconcile 循环里白打的往返会被放大。"""
+    client, session = make_rich_menu_client(monkeypatch, [])
+
+    assert (
+        await client.create_rich_menu(minimal_rich_menu(chatBarText="x" * 15)) is None
+    )
+    assert await client.create_rich_menu(minimal_rich_menu(name="n" * 301)) is None
+    assert (await client.create_rich_menu(minimal_rich_menu(areas=[{}] * 21))) is None
+    assert await client.create_rich_menu(minimal_rich_menu(areas="nope")) is None
+    assert session.calls == []
+
+    # 边界值本身合法，必须放行。
+    await client.create_rich_menu(minimal_rich_menu(chatBarText="x" * 14))
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_rich_menu_image_uses_data_host_and_raw_body(monkeypatch):
+    client, session = make_rich_menu_client(monkeypatch, [(200, "{}")])
+
+    result = await client.upload_rich_menu_image("rm-1", b"\x89PNG...")
+    assert result.ok
+    call = session.calls[0]
+    assert call["url"] == ("https://api-data.line.me/v2/bot/richmenu/rm-1/content")
+    # 裸二进制，不是 multipart，也不是 JSON。
+    assert call["data"] == b"\x89PNG..."
+    assert call["json"] is None
+    assert call["headers"]["Content-Type"] == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_upload_rich_menu_image_rejects_oversize_and_bad_type(monkeypatch):
+    client, session = make_rich_menu_client(monkeypatch, [])
+
+    over = await client.upload_rich_menu_image("rm-1", b"x" * (1024 * 1024 + 1))
+    assert over.ok is False
+    assert over.error_category is LineErrorCategory.BAD_REQUEST
+
+    bad_type = await client.upload_rich_menu_image(
+        "rm-1", b"x", content_type="image/webp"
+    )
+    assert bad_type.ok is False
+
+    empty = await client.upload_rich_menu_image("rm-1", b"")
+    assert empty.ok is False
+
+    assert session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_link_chunks_at_500_and_accepts_202(monkeypatch):
+    client, session = make_rich_menu_client(monkeypatch, [(202, ""), (202, "")])
+
+    user_ids = [f"U{i}" for i in range(501)]
+    result = await client.bulk_link_rich_menu("rm-1", user_ids)
+
+    assert result.ok is True
+    assert len(session.calls) == 2
+    assert len(session.calls[0]["json"]["userIds"]) == 500
+    assert len(session.calls[1]["json"]["userIds"]) == 1
+    assert session.calls[0]["json"]["richMenuId"] == "rm-1"
+
+
+@pytest.mark.asyncio
+async def test_bulk_link_reports_first_failure_but_sends_rest(monkeypatch):
+    """中断只会让「绑了一半」更难收敛，剩余批次照发，失败交给下一轮 reconcile。"""
+    client, session = make_rich_menu_client(
+        monkeypatch, [(429, json.dumps({"message": "too many"})), (202, "")]
+    )
+
+    result = await client.bulk_link_rich_menu("rm-1", [f"U{i}" for i in range(501)])
+
+    assert result.ok is False
+    assert result.error_category is LineErrorCategory.RATE_LIMITED
+    assert len(session.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_rich_menu_id_of_user_absent_is_not_an_error(monkeypatch):
+    """未绑定是常态，不能刷 error 日志。"""
+    client, _ = make_rich_menu_client(
+        monkeypatch, [(404, json.dumps({"message": "not found"}))]
+    )
+    logged: list[int] = []
+
+    def spy(op_name, result, *, level: int = logging.ERROR):
+        logged.append(level)
+
+    monkeypatch.setattr(LineAPIClient, "_log_failure", staticmethod(spy))
+
+    assert await client.get_rich_menu_id_of_user("U1") is None
+    assert logged == [logging.DEBUG]
+
+
+@pytest.mark.asyncio
+async def test_rich_menu_alias_id_is_validated(monkeypatch):
+    client, session = make_rich_menu_client(monkeypatch, [(200, "{}")])
+
+    bad = await client.create_rich_menu_alias("MCMai-Main", "rm-1")
+    assert bad.ok is False
+    assert session.calls == []
+
+    good = await client.create_rich_menu_alias("mcmai-main-ja", "rm-1")
+    assert good.ok is True
+    assert session.calls[0]["json"] == {
+        "richMenuAliasId": "mcmai-main-ja",
+        "richMenuId": "rm-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_rich_menus_tolerates_junk(monkeypatch):
+    client, _ = make_rich_menu_client(
+        monkeypatch,
+        [(200, json.dumps({"richmenus": [{"richMenuId": "rm-1"}, "junk"]}))],
+    )
+    assert await client.list_rich_menus() == [{"richMenuId": "rm-1"}]
+
+
+@pytest.mark.asyncio
+async def test_rich_menu_network_error_is_classified(monkeypatch):
+    client = LineAPIClient(channel_access_token="t", channel_secret="s")
+
+    class ExplodingSession:
+        def request(self, *_args, **_kwargs):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        client, "_get_session", lambda: _async_value(ExplodingSession())
+    )
+    result = await client.delete_rich_menu("rm-1")
+    assert result.ok is False
+    assert result.error_category is LineErrorCategory.NETWORK_ERROR

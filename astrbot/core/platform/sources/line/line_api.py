@@ -9,6 +9,9 @@ import asyncio
 import base64
 import hmac
 import json
+import logging
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
@@ -32,6 +35,17 @@ LINE_API_DATA_BASE = "https://api-data.line.me"
 
 _RAW_BODY_LOG_LIMIT = 1024
 """失败日志里保留的原始正文长度上限（5xx 常返回 HTML 或网关文本）。"""
+
+# Rich Menu 的硬约束。这些值在本地先拦一道：违反它们的请求必然 400，
+# 而 Rich Menu 的调用方通常在一个 reconcile 循环里，白打的往返会被放大。
+_RICH_MENU_NAME_MAX = 300
+_RICH_MENU_CHAT_BAR_TEXT_MAX = 14
+_RICH_MENU_AREA_MAX = 20
+_RICH_MENU_IMAGE_MAX_BYTES = 1024 * 1024
+_RICH_MENU_IMAGE_CONTENT_TYPES = frozenset({"image/png", "image/jpeg"})
+_RICH_MENU_ALIAS_ID_PATTERN = re.compile(r"^[a-z0-9_-]{1,32}$")
+_RICH_MENU_BULK_MAX = 500
+"""bulk link / unlink 单次接受的 userId 上限，超出由客户端切片。"""
 
 
 class LineErrorCategory(str, Enum):
@@ -61,6 +75,24 @@ class LineSendResult:
     ok: bool
     status: int | None = None
     sent_messages: list[LineSentMessage] = field(default_factory=list)
+    error_category: LineErrorCategory | None = None
+    error_message: str = ""
+    error_details: list[dict[str, Any]] = field(default_factory=list)
+    raw_body: str = ""
+    """截断后的原始正文；响应体解析失败时这是唯一的线索。"""
+
+
+@dataclass(slots=True)
+class LineApiResult:
+    """一次非发送类 API 调用的结果（Rich Menu 等）。
+
+    与 LineSendResult 分开：那个类的 sent_messages 在这里没有意义，而这里需要一个
+    通用的 data 承载响应体（richMenuId / richmenus 列表 / alias 信息）。
+    """
+
+    ok: bool
+    status: int | None = None
+    data: dict[str, Any] | None = None
     error_category: LineErrorCategory | None = None
     error_message: str = ""
     error_details: list[dict[str, Any]] = field(default_factory=list)
@@ -276,8 +308,14 @@ class LineAPIClient:
         return LineErrorCategory.HTTP_ERROR
 
     @staticmethod
-    def _log_failure(op_name: str, result: LineSendResult) -> None:
-        logger.error(
+    def _log_failure(
+        op_name: str,
+        result: LineSendResult | LineApiResult,
+        *,
+        level: int = logging.ERROR,
+    ) -> None:
+        logger.log(
+            level,
             "[LINE] %s failed: category=%s status=%s message=%s details=%s body=%s",
             op_name,
             result.error_category.value if result.error_category else "unknown",
@@ -285,6 +323,100 @@ class LineAPIClient:
             result.error_message or "-",
             result.error_details or "-",
             result.raw_body or "-",
+        )
+
+    # ------------------------------------------------------------ 通用请求
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: Any = None,
+        body: bytes | None = None,
+        content_type: str | None = None,
+        op_name: str,
+        expected_absent: frozenset[int] = frozenset(),
+    ) -> LineApiResult:
+        """发一次请求并把结果规整成 LineApiResult。
+
+        与 _send_messages 分开：那个方法要解析 sentMessages、只支持 POST JSON，
+        而这里要覆盖 GET / DELETE / POST JSON / POST 二进制四种形态。
+
+        Args:
+            json_body: JSON 请求体；与 body 互斥。
+            body: 二进制请求体（上传图片），需同时给 content_type。
+            op_name: 失败日志里的操作名。
+            expected_absent: 视为「正常的查不到」的状态码（通常是 404）。命中时仍返回
+                ok=False，但只记 debug —— 查一个没绑定过的用户是常态，不该刷 error。
+        """
+        headers = dict(self._auth_headers)
+        if content_type:
+            headers["Content-Type"] = content_type
+        elif json_body is not None:
+            headers["Content-Type"] = "application/json"
+
+        try:
+            session = await self._get_session()
+            async with session.request(
+                method,
+                url,
+                json=json_body,
+                data=body,
+                headers=headers,
+            ) as resp:
+                raw = await resp.text()
+                status = resp.status
+        except Exception as e:
+            result = LineApiResult(
+                ok=False,
+                error_category=LineErrorCategory.NETWORK_ERROR,
+                error_message=str(e),
+            )
+            self._log_failure(op_name, result)
+            return result
+
+        data = self._parse_json_body(raw)
+        # 与发送路径同口径：只有 2xx 算成功。bulk link / unlink 返回 202。
+        if 200 <= status < 300:
+            return LineApiResult(
+                ok=True,
+                status=status,
+                data=data,
+                raw_body="" if data is not None else raw[:_RAW_BODY_LOG_LIMIT],
+            )
+
+        message = str(data.get("message", "")) if isinstance(data, dict) else ""
+        details = data.get("details") if isinstance(data, dict) else None
+        result = LineApiResult(
+            ok=False,
+            status=status,
+            error_category=self._classify_error(status, message, details, op_name),
+            error_message=message,
+            error_details=[d for d in details if isinstance(d, dict)]
+            if isinstance(details, list)
+            else [],
+            raw_body="" if isinstance(data, dict) else raw[:_RAW_BODY_LOG_LIMIT],
+        )
+        self._log_failure(
+            op_name,
+            result,
+            level=logging.DEBUG if status in expected_absent else logging.ERROR,
+        )
+        return result
+
+    @staticmethod
+    def _reject(op_name: str, reason: str) -> LineApiResult:
+        """本地校验不通过时的统一出口：不发请求，直接失败。
+
+        记 error 而不是 warning：这类问题只可能来自调用方拼错对象，不是运行时波动，
+        必须在日志里显眼到能被立刻发现。
+        """
+        logger.error("[LINE] %s rejected locally: %s", op_name, reason)
+        return LineApiResult(
+            ok=False,
+            error_category=LineErrorCategory.BAD_REQUEST,
+            error_message=reason,
         )
 
     # ------------------------------------------------------------ 入站内容
@@ -503,3 +635,313 @@ class LineAPIClient:
         except Exception as e:
             logger.debug("[LINE] loading animation error: %s", e)
             return False
+
+    # ------------------------------------------------------------ Rich Menu
+
+    async def create_rich_menu(self, menu: dict[str, Any]) -> str | None:
+        """创建一张 Rich Menu，返回 richMenuId；失败返回 None。
+
+        创建出来的菜单此时还没有图，客户端上是一片空白，必须紧接着
+        upload_rich_menu_image()，否则不要把它设为默认或绑给用户。
+        """
+        reason = self._invalid_rich_menu_reason(menu)
+        if reason:
+            self._reject("create rich menu", reason)
+            return None
+        result = await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/richmenu",
+            json_body=menu,
+            op_name="create rich menu",
+        )
+        rich_menu_id = str((result.data or {}).get("richMenuId", "")).strip()
+        return rich_menu_id or None
+
+    async def validate_rich_menu(self, menu: dict[str, Any]) -> LineApiResult:
+        """干跑校验一个 Rich Menu 对象，不创建任何东西。
+
+        返回完整结果而不是 bool：这个接口存在的意义就是拿到「哪里不合规」。
+        """
+        reason = self._invalid_rich_menu_reason(menu)
+        if reason:
+            return self._reject("validate rich menu", reason)
+        return await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/richmenu/validate",
+            json_body=menu,
+            op_name="validate rich menu",
+        )
+
+    async def upload_rich_menu_image(
+        self,
+        rich_menu_id: str,
+        image: bytes,
+        *,
+        content_type: str = "image/png",
+    ) -> LineApiResult:
+        """上传菜单图。走 api-data 域，请求体是裸二进制而非 multipart。"""
+        if content_type not in _RICH_MENU_IMAGE_CONTENT_TYPES:
+            return self._reject(
+                "upload rich menu image",
+                f"content_type must be one of "
+                f"{sorted(_RICH_MENU_IMAGE_CONTENT_TYPES)}, got {content_type}",
+            )
+        if not image:
+            return self._reject("upload rich menu image", "image is empty")
+        if len(image) > _RICH_MENU_IMAGE_MAX_BYTES:
+            return self._reject(
+                "upload rich menu image",
+                f"image is {len(image)} bytes, over the "
+                f"{_RICH_MENU_IMAGE_MAX_BYTES} bytes limit",
+            )
+        return await self._request(
+            "POST",
+            f"{LINE_API_DATA_BASE}/v2/bot/richmenu/{rich_menu_id}/content",
+            body=image,
+            content_type=content_type,
+            op_name="upload rich menu image",
+        )
+
+    async def get_rich_menu(self, rich_menu_id: str) -> dict[str, Any] | None:
+        """取单张菜单的定义；不存在返回 None。"""
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/richmenu/{rich_menu_id}",
+            op_name="get rich menu",
+            expected_absent=frozenset({404}),
+        )
+        return result.data if result.ok else None
+
+    async def list_rich_menus(self) -> list[dict[str, Any]]:
+        """列出本 channel 用 Messaging API 建的全部菜单。
+
+        注意范围：LINE Official Account Manager 里手工配的菜单**不在结果里**，
+        两套工具管理的是彼此不可见的实例。
+        """
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/richmenu/list",
+            op_name="list rich menus",
+        )
+        menus = (result.data or {}).get("richmenus")
+        return (
+            [m for m in menus if isinstance(m, dict)] if isinstance(menus, list) else []
+        )
+
+    async def delete_rich_menu(self, rich_menu_id: str) -> LineApiResult:
+        """删除一张菜单。正被引用的 alias 会一并失效，删之前先把 alias 指向新菜单。"""
+        return await self._request(
+            "DELETE",
+            f"{LINE_API_BASE}/v2/bot/richmenu/{rich_menu_id}",
+            op_name="delete rich menu",
+        )
+
+    # ---- 默认菜单 ----
+
+    async def set_default_rich_menu(self, rich_menu_id: str) -> LineApiResult:
+        """设为默认菜单（所有没有 per-user 绑定的用户看到它）。
+
+        它的优先级高于 LINE Official Account Manager 里配的默认菜单，会把那张盖掉。
+        """
+        return await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/user/all/richmenu/{rich_menu_id}",
+            op_name="set default rich menu",
+        )
+
+    async def get_default_rich_menu_id(self) -> str | None:
+        """取当前默认菜单 id；没设过返回 None。"""
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/user/all/richmenu",
+            op_name="get default rich menu",
+            expected_absent=frozenset({404}),
+        )
+        return str((result.data or {}).get("richMenuId", "")).strip() or None
+
+    async def cancel_default_rich_menu(self) -> LineApiResult:
+        """撤销默认菜单。"""
+        return await self._request(
+            "DELETE",
+            f"{LINE_API_BASE}/v2/bot/user/all/richmenu",
+            op_name="cancel default rich menu",
+        )
+
+    # ---- per-user 绑定 ----
+
+    async def link_rich_menu_to_user(
+        self, user_id: str, rich_menu_id: str
+    ) -> LineApiResult:
+        """把菜单绑给单个用户。只能绑用户，群 / 多人聊天绑不了。
+
+        返回完整结果而不是 bool：调用方需要区分「这人不是好友了」（4xx，该清掉本地
+        绑定缓存）和「网络抖了一下」（该重试）。
+        """
+        return await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/user/{user_id}/richmenu/{rich_menu_id}",
+            op_name="link rich menu to user",
+        )
+
+    async def unlink_rich_menu_from_user(self, user_id: str) -> LineApiResult:
+        """解除单个用户的绑定，之后他看到的是默认菜单。"""
+        return await self._request(
+            "DELETE",
+            f"{LINE_API_BASE}/v2/bot/user/{user_id}/richmenu",
+            op_name="unlink rich menu from user",
+        )
+
+    async def get_rich_menu_id_of_user(self, user_id: str) -> str | None:
+        """取用户当前绑定的菜单 id；未绑定返回 None（404 是常态，不记 error）。"""
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/user/{user_id}/richmenu",
+            op_name="get rich menu of user",
+            expected_absent=frozenset({404}),
+        )
+        return str((result.data or {}).get("richMenuId", "")).strip() or None
+
+    async def bulk_link_rich_menu(
+        self, rich_menu_id: str, user_ids: Sequence[str]
+    ) -> LineApiResult:
+        """批量绑定。超过 500 个 userId 时自动切片，调用方不必关心这个上限。
+
+        LINE 侧是异步受理（202），返回 ok 只代表请求被接受，不代表全部生效。
+        """
+        return await self._bulk_rich_menu(
+            f"{LINE_API_BASE}/v2/bot/richmenu/bulk/link",
+            user_ids,
+            extra={"richMenuId": rich_menu_id},
+            op_name="bulk link rich menu",
+        )
+
+    async def bulk_unlink_rich_menu(self, user_ids: Sequence[str]) -> LineApiResult:
+        """批量解绑，切片规则同 bulk_link_rich_menu。"""
+        return await self._bulk_rich_menu(
+            f"{LINE_API_BASE}/v2/bot/richmenu/bulk/unlink",
+            user_ids,
+            extra={},
+            op_name="bulk unlink rich menu",
+        )
+
+    async def _bulk_rich_menu(
+        self,
+        url: str,
+        user_ids: Sequence[str],
+        *,
+        extra: dict[str, Any],
+        op_name: str,
+    ) -> LineApiResult:
+        """按 500 一批发出去。任一批失败即整体失败，但剩余批次照发。
+
+        不在首个失败处中断：这些调用彼此独立，中断只会让「已绑一半」的状态更难收敛，
+        而下一轮 reconcile 本来就会重试失败的那些人。
+        """
+        ids = [str(uid).strip() for uid in user_ids if str(uid).strip()]
+        if not ids:
+            return self._reject(op_name, "user_ids is empty")
+
+        failure: LineApiResult | None = None
+        last: LineApiResult | None = None
+        for start in range(0, len(ids), _RICH_MENU_BULK_MAX):
+            chunk = ids[start : start + _RICH_MENU_BULK_MAX]
+            last = await self._request(
+                "POST",
+                url,
+                json_body={**extra, "userIds": chunk},
+                op_name=op_name,
+            )
+            if not last.ok and failure is None:
+                failure = last
+        return failure or last  # type: ignore[return-value]  # ids 非空，循环必然跑过
+
+    # ---- 别名（richmenuswitch 的切换目标） ----
+
+    async def create_rich_menu_alias(
+        self, alias_id: str, rich_menu_id: str
+    ) -> LineApiResult:
+        """创建别名。richmenuswitch action 只认别名，不认 richMenuId。"""
+        if not _RICH_MENU_ALIAS_ID_PATTERN.match(alias_id):
+            return self._reject(
+                "create rich menu alias",
+                f"alias id must match {_RICH_MENU_ALIAS_ID_PATTERN.pattern}, "
+                f"got {alias_id!r}",
+            )
+        return await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/richmenu/alias",
+            json_body={"richMenuAliasId": alias_id, "richMenuId": rich_menu_id},
+            op_name="create rich menu alias",
+        )
+
+    async def update_rich_menu_alias(
+        self, alias_id: str, rich_menu_id: str
+    ) -> LineApiResult:
+        """把已有别名改指到另一张菜单。菜单没有「更新」接口，改版就是靠这一步切换。"""
+        return await self._request(
+            "POST",
+            f"{LINE_API_BASE}/v2/bot/richmenu/alias/{alias_id}",
+            json_body={"richMenuId": rich_menu_id},
+            op_name="update rich menu alias",
+        )
+
+    async def delete_rich_menu_alias(self, alias_id: str) -> LineApiResult:
+        """删除别名。"""
+        return await self._request(
+            "DELETE",
+            f"{LINE_API_BASE}/v2/bot/richmenu/alias/{alias_id}",
+            op_name="delete rich menu alias",
+        )
+
+    async def get_rich_menu_alias(self, alias_id: str) -> dict[str, Any] | None:
+        """取别名信息；不存在返回 None。"""
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/richmenu/alias/{alias_id}",
+            op_name="get rich menu alias",
+            expected_absent=frozenset({404}),
+        )
+        return result.data if result.ok else None
+
+    async def list_rich_menu_aliases(self) -> list[dict[str, Any]]:
+        """列出本 channel 的全部别名。"""
+        result = await self._request(
+            "GET",
+            f"{LINE_API_BASE}/v2/bot/richmenu/alias/list",
+            op_name="list rich menu aliases",
+        )
+        aliases = (result.data or {}).get("aliases")
+        return (
+            [a for a in aliases if isinstance(a, dict)]
+            if isinstance(aliases, list)
+            else []
+        )
+
+    @staticmethod
+    def _invalid_rich_menu_reason(menu: Any) -> str:
+        """返回第一条不合规的原因；合规返回空串。
+
+        只查 LINE 明文规定、且违反后必然 400 的那几条硬上限。尺寸、坐标、action 的
+        合法性交给服务端 —— 在本地重实现一份校验只会与 LINE 的规则漂移。
+        """
+        if not isinstance(menu, dict):
+            return f"rich menu must be a dict, got {type(menu).__name__}"
+
+        name = str(menu.get("name", ""))
+        if len(name) > _RICH_MENU_NAME_MAX:
+            return f"name is {len(name)} chars, over the {_RICH_MENU_NAME_MAX} limit"
+
+        chat_bar_text = str(menu.get("chatBarText", ""))
+        if len(chat_bar_text) > _RICH_MENU_CHAT_BAR_TEXT_MAX:
+            return (
+                f"chatBarText is {len(chat_bar_text)} chars, over the "
+                f"{_RICH_MENU_CHAT_BAR_TEXT_MAX} limit"
+            )
+
+        areas = menu.get("areas")
+        if not isinstance(areas, list):
+            return "areas must be a list"
+        if len(areas) > _RICH_MENU_AREA_MAX:
+            return f"areas has {len(areas)} items, over the {_RICH_MENU_AREA_MAX} limit"
+
+        return ""
