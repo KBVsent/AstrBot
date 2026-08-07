@@ -14,6 +14,8 @@
   拿不到 URL 就整条降级为 alt_text，而 LineRawMessage 永不做媒体解析。
 - Rich Menu：本地硬约束在发请求前拦截；上传图走 api-data 域的裸二进制；bulk 按 500
   切片且 202 算成功；「用户未绑定」的 404 不刷 error 日志。
+- 原始平台事件钩子：follow 这类进不了 pipeline 的事件也会发射；钩子里 stop_event() 或
+  抛异常都不影响正常消息处理。
 """
 
 import asyncio
@@ -1202,6 +1204,91 @@ async def test_handle_msg_sets_user_locale_extra():
     await adapter.handle_msg(abm)
     event = adapter.committed_events.get_nowait()
     assert event.get_extra("user_locale") is None
+
+
+# -------------------------------------------------------- 原始平台事件钩子
+
+
+def follow_event(event_id: str = "e-follow") -> dict:
+    return {
+        "type": "follow",
+        "webhookEventId": event_id,
+        "replyToken": "reply-token",
+        "timestamp": 1,
+        "mode": "active",
+        "source": {"type": "user", "userId": "U1"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_follow_event_reaches_raw_hook_but_not_pipeline():
+    """follow / unfollow 进不了 convert_message，raw hook 是它们唯一的出口。"""
+    adapter = make_adapter()
+    seen: list[tuple] = []
+
+    async def fake_emit(payload, *, meta=None, plugins_name=None):  # noqa: ARG001
+        seen.append((payload, meta))
+        return False
+
+    adapter.emit_raw_platform_event = fake_emit  # type: ignore[method-assign]
+    adapter.destination = "Uself"
+
+    event = follow_event()
+    await adapter._process_event(event)
+
+    assert len(seen) == 1
+    payload, meta = seen[0]
+    assert payload is event
+    assert meta == {
+        "event_type": "follow",
+        "source_type": "user",
+        "destination": "Uself",
+        "webhook_event_id": "e-follow",
+        "mode": "active",
+    }
+    # 不是 message / postback，不该产生 pipeline 事件。
+    assert adapter.committed_events.empty()
+
+
+@pytest.mark.asyncio
+async def test_message_event_also_reaches_raw_hook():
+    """过滤是 raw_event_type 的职责，适配器对所有事件类型一视同仁。"""
+    adapter = make_adapter()
+    seen: list[str] = []
+
+    async def fake_emit(payload, *, meta=None, plugins_name=None):  # noqa: ARG001
+        seen.append((meta or {}).get("event_type", ""))
+        return False
+
+    adapter.emit_raw_platform_event = fake_emit  # type: ignore[method-assign]
+    await adapter._process_event(text_event("e-raw-msg"))
+    assert seen == ["message"]
+    assert adapter.committed_events.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_hook_stop_does_not_block_message_pipeline():
+    """raw hook 是旁路观测，不该有掐断消息管线的权力。"""
+    adapter = make_adapter()
+
+    async def stopping_emit(payload, *, meta=None, plugins_name=None):  # noqa: ARG001
+        return True  # 插件调用了 stop_event()
+
+    adapter.emit_raw_platform_event = stopping_emit  # type: ignore[method-assign]
+    await adapter._process_event(text_event("e-raw-stop"))
+    assert adapter.committed_events.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_raw_hook_failure_does_not_break_event():
+    adapter = make_adapter()
+
+    async def exploding_emit(payload, *, meta=None, plugins_name=None):  # noqa: ARG001
+        raise RuntimeError("boom")
+
+    adapter.emit_raw_platform_event = exploding_emit  # type: ignore[method-assign]
+    await adapter._process_event(text_event("e-raw-boom"))
+    assert adapter.committed_events.qsize() == 1
 
 
 # -------------------------------------------------------------- Rich Menu

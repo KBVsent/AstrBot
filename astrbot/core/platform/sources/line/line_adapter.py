@@ -336,10 +336,32 @@ class LinePlatformAdapter(Platform):
                 self._inbound_queue.task_done()
 
     async def _process_event(self, event: dict[str, Any]) -> None:
+        await self._emit_raw_event(event)
         abm = await self.convert_message(event)
         if abm is None:
             return
         await self.handle_msg(abm)
+
+    async def _emit_raw_event(self, event: dict[str, Any]) -> None:
+        """原始事件抛出"""
+        try:
+            source = event.get("source")
+            await self.emit_raw_platform_event(
+                event,
+                meta={
+                    "event_type": str(event.get("type", "")),
+                    "source_type": str((source or {}).get("type", ""))
+                    if isinstance(source, dict)
+                    else "",
+                    "destination": self.destination,
+                    "webhook_event_id": str(event.get("webhookEventId", "")),
+                    "mode": str(event.get("mode", "active")),
+                },
+            )
+        except Exception:
+            logger.error(
+                "[LINE] raw platform event hook failed: %s", traceback.format_exc()
+            )
 
     # ------------------------------------------------------------ 入站转换
 
