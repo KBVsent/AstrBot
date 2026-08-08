@@ -186,12 +186,15 @@ class LineFlexMedia(BaseModel):
             icon —— icon 组件，另外压到更小的 payload；
             original —— 不转码、不缩放，产出的 URL 供 uri action 打开（客户端浏览器里
             看原图，不由 LINE 渲染，因此不受 Flex 的格式与像素约束）。
+        url_template: 回填前再包一层的模板，含子串 {url}；None 表示直接回填公网 URL。
+            {url} 被替换成 percent-encoded 的公网 URL。
     """
 
     # 声明为 Any 而非 Image：与 LineQuickReplyItem.action 同样的理由 ——
     # pydantic v1 会按声明类型重新校验/复制字段，这里改为在转换时做 isinstance 检查。
     media: Any
     profile: Literal["image", "icon", "original"] = "image"
+    url_template: str | None = None
 
     class Config:
         arbitrary_types_allowed = True

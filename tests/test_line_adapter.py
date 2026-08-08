@@ -748,6 +748,44 @@ async def test_flex_original_profile_serves_the_full_size_image(
 
 
 @pytest.mark.asyncio
+async def test_flex_media_url_template_wraps_only_its_own_key(tmp_path, flex_media_env):
+    """url_template 把公网 URL 包进查看页链接，且不污染共享同一次上传的其它 key。
+
+    400x300 的图两个 profile 都短路返回原路径，因此只上传一次、两个 key 共用上传缓存 ——
+    包装必须发生在缓存之后，否则不带模板的 hero 会拿到被包过的 URL。
+    """
+    image = Image.fromFileSystem(_write_png(tmp_path / "a.png", (400, 300)))
+    flex = LineFlex(
+        alt_text="B50",
+        media={
+            "hero": image,
+            "full": LineFlexMedia(
+                media=image,
+                profile="original",
+                url_template="https://view.example.com/v?u={url}",
+            ),
+        },
+        contents={
+            "type": "bubble",
+            "hero": {
+                "type": "image",
+                "url": LineFlex.ref("hero"),
+                "action": {"type": "uri", "uri": LineFlex.ref("full")},
+            },
+        },
+    )
+
+    batch = await build_line_batch(MessageChain(chain=[flex]), None)
+    hero = batch.messages[0]["contents"]["hero"]
+
+    assert len(flex_media_env) == 1
+    assert hero["url"] == "https://cdn.example.com/a.png"
+    assert hero["action"]["uri"] == (
+        "https://view.example.com/v?u=https%3A%2F%2Fcdn.example.com%2Fa.png"
+    )
+
+
+@pytest.mark.asyncio
 async def test_flex_media_is_localized_and_uploaded_once_per_rendition(
     tmp_path, flex_media_env, monkeypatch
 ):

@@ -15,6 +15,7 @@ import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -359,7 +360,13 @@ async def _resolve_flex_media(
 
     if prepared not in uploaded:
         uploaded[prepared] = await resolve_public_media_url(prepared, chain)
-    return uploaded[prepared]
+    url = uploaded[prepared]
+
+    # 包装在上传缓存之后：同一个文件被两个 key 引用、但只有其中一个要包装时，
+    # 缓存里存的必须还是裸的公网 URL。
+    if url and isinstance(entry, LineFlexMedia) and entry.url_template:
+        return entry.url_template.replace("{url}", quote(url, safe=""))
+    return url
 
 
 def _substitute_flex_media(node: object, resolved: dict[str, str]) -> Any:
