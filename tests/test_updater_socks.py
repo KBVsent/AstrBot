@@ -957,6 +957,8 @@ async def test_download_dashboard_falls_back_when_hosted_package_is_not_zip(
     tmp_path: Path,
 ) -> None:
     calls: list[str] = []
+    # 关掉本 fork 自建的 WebUI 源，让下载链回到上游的 registry -> GitHub release
+    monkeypatch.setenv("ASTRBOT_FORK_DASHBOARD_REPO", "")
 
     async def fake_download_file(
         url: str,
@@ -989,6 +991,33 @@ async def test_download_dashboard_falls_back_when_hosted_package_is_not_zip(
     assert calls == [
         "https://astrbot-registry.soulter.top/download/astrbot-dashboard/v99.0.0/dist.zip",
         "https://github.com/AstrBotDevs/AstrBot/releases/download/v99.0.0/AstrBot-v99.0.0-dashboard.zip",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_download_dashboard_prefers_fork_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.delenv("ASTRBOT_FORK_DASHBOARD_REPO", raising=False)
+
+    async def fake_download_file(url: str, path: str, **_kwargs) -> None:
+        calls.append(url)
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("dist/index.html", "dashboard")
+
+    monkeypatch.setattr(dashboard_assets, "download_file", fake_download_file)
+
+    zip_path = tmp_path / "dashboard.zip"
+    await dashboard_assets._download_package(
+        path=str(zip_path),
+        version="v99.0.0",
+        extract=False,
+    )
+
+    assert calls == [
+        "https://github.com/KBVsent/AstrBot/releases/download/webui-v99.0.0/dist.zip",
     ]
 
 

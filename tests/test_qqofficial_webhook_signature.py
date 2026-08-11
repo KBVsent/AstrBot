@@ -29,6 +29,17 @@ class FakeBotpyClient:
         return None
 
 
+class FakePlatform:
+    """handle_callback 会先把原始事件抛给平台，再做签名校验。"""
+
+    def __init__(self) -> None:
+        self.emitted: list[tuple[dict, dict]] = []
+
+    async def emit_raw_platform_event(self, raw, meta=None) -> bool:
+        self.emitted.append((raw, meta or {}))
+        return False
+
+
 def test_qq_webhook_signature_verification_accepts_valid_signature():
     secret = "test-secret"
     timestamp = "1710000000"
@@ -56,6 +67,7 @@ def test_qq_webhook_signature_verification_rejects_tampered_body():
 async def test_qq_webhook_callback_rejects_missing_signature():
     webhook = object.__new__(QQOfficialWebhook)
     webhook.secret = "test-secret"
+    webhook.platform = FakePlatform()
 
     result = await webhook.handle_callback(FakeRequest(b'{"op":12,"d":0}'))
 
@@ -73,6 +85,7 @@ async def test_qq_webhook_callback_accepts_unsigned_validation():
     ).encode("utf-8")
     webhook = object.__new__(QQOfficialWebhook)
     webhook.secret = secret
+    webhook.platform = FakePlatform()
 
     result = await webhook.handle_callback(FakeRequest(body))
 
@@ -95,6 +108,7 @@ async def test_qq_webhook_callback_lazily_creates_botpy_connection():
         {"appid": "123", "secret": secret},
         asyncio.Queue(),
         FakeBotpyClient(),
+        FakePlatform(),
     )
 
     result = await webhook.handle_callback(

@@ -837,7 +837,7 @@ async def test_prepare_chat_payload_materializes_context_http_image_urls_with_de
         image_path = tmp_path / "quoted-image.png"
         PILImage.new("RGBA", (1, 1), (255, 0, 0, 255)).save(image_path)
 
-        async def fake_download(url: str, target_path: str) -> None:
+        async def fake_download(url: str, target_path: str, **_kwargs) -> None:
             assert url == "https://example.com/quoted.png"
             with open(target_path, "wb") as f:
                 f.write(image_path.read_bytes())
