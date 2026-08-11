@@ -333,7 +333,8 @@ class DiscordPlatformAdapter(Platform):
         for attachment in message.attachments:
             _append_attachment(attachment)
         # 引用（回复）消息的附件
-        resolved = message.reference.resolved if message.reference else None
+        reference = getattr(message, "reference", None)
+        resolved = reference.resolved if reference else None
         for attachment in getattr(resolved, "attachments", None) or []:
             _append_attachment(attachment)
         abm.message = message_chain
