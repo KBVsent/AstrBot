@@ -14,6 +14,7 @@ from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot.core.utils.webhook_utils import log_webhook_info
 
 from ...register import register_platform_adapter
+from ..qqofficial.qqofficial_message_event import resolve_group
 from ..qqofficial.qqofficial_platform_adapter import (
     QQOfficialPlatformAdapter,
     _ensure_group_message_create_parser,
@@ -40,7 +41,7 @@ class botClient(Client):
             MessageType.GROUP_MESSAGE,
             force_group_mention=True,
         )
-        abm.group_id = cast(str, message.group_openid)
+        abm.group = await resolve_group(self, cast(str, message.group_openid))
         abm.session_id = abm.group_id
         self.platform.remember_session_scene(abm.session_id, "group")
         self._commit(abm)
@@ -52,7 +53,7 @@ class botClient(Client):
             message,
             MessageType.GROUP_MESSAGE,
         )
-        abm.group_id = cast(str, message.group_openid)
+        abm.group = await resolve_group(self, cast(str, message.group_openid))
         abm.session_id = abm.group_id
         self.platform.remember_session_scene(abm.session_id, "group")
         self._commit(abm)
@@ -107,6 +108,8 @@ class botClient(Client):
         scene = {0: "channel", 1: "group", 2: "friend"}.get(
             interaction.chat_type, "friend"
         )
+        if interaction.chat_type == 1 and interaction.group_openid:
+            abm.group = await resolve_group(self, interaction.group_openid)
         self.platform.remember_session_scene(abm.session_id, scene)
         # interaction 不是消息，不更新会话级 msg_id 缓存（避免污染主动推送）
         event = self._commit(abm, update_session_msg_id=False)

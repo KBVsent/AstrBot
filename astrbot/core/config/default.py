@@ -3857,7 +3857,7 @@ CONFIG_METADATA_3 = {
                     "provider_settings.group_name_display": {
                         "description": "显示群名称",
                         "type": "bool",
-                        "hint": "启用后，在支持的平台(OneBot v11)上会在提示词前包含群名称信息。",
+                        "hint": "启用后，在支持的平台(OneBot v11、LINE、QQ 官方)上会在提示词前包含群名称信息。",
                     },
                     "provider_settings.datetime_system_prompt": {
                         "description": "现实世界时间感知",

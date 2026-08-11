@@ -32,7 +32,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent, MessageSe
 from astrbot.core.utils.media_utils import MediaResolver
 
 from ...register import register_platform_adapter
-from .qqofficial_message_event import QQOfficialMessageEvent
+from .qqofficial_message_event import QQOfficialMessageEvent, resolve_group
 
 # remove logger handler
 for handler in logging.root.handlers[:]:
@@ -233,7 +233,7 @@ class botClient(Client):
             MessageType.GROUP_MESSAGE,
             force_group_mention=True,
         )
-        abm.group_id = cast(str, message.group_openid)
+        abm.group = await resolve_group(self, cast(str, message.group_openid))
         abm.session_id = abm.group_id
         self.platform.remember_session_scene(abm.session_id, "group")
         self._commit(abm)
@@ -245,7 +245,7 @@ class botClient(Client):
             message,
             MessageType.GROUP_MESSAGE,
         )
-        abm.group_id = cast(str, message.group_openid)
+        abm.group = await resolve_group(self, cast(str, message.group_openid))
         abm.session_id = abm.group_id
         self.platform.remember_session_scene(abm.session_id, "group")
         self._commit(abm)
@@ -296,6 +296,8 @@ class botClient(Client):
         scene = {0: "channel", 1: "group", 2: "friend"}.get(
             interaction.chat_type, "friend"
         )
+        if interaction.chat_type == 1 and interaction.group_openid:
+            abm.group = await resolve_group(self, interaction.group_openid)
         self.platform.remember_session_scene(abm.session_id, scene)
         # interaction 不是消息，不更新会话级 msg_id 缓存
         event = self._commit(abm, update_session_msg_id=False)

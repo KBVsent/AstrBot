@@ -4,7 +4,9 @@ import copy
 import logging
 import os
 import random
-from typing import cast
+import time
+from collections import OrderedDict
+from typing import Any, cast
 
 import aiofiles
 import botpy
@@ -29,6 +31,7 @@ from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import File, Image, Plain, Record, Reply, Video
 from astrbot.api.platform import AstrBotMessage, PlatformMetadata
+from astrbot.core.platform.astrbot_message import Group
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
 from ._markdown_media import image_to_markdown_fragment
@@ -37,6 +40,83 @@ from .components import QQCButton, QQCKeyboard
 
 class APIReturnNoneError(Exception):
     pass
+
+
+# 群信息与机器人在群状态两个接口都限 30 QPM，而群名是每条入站群消息都要回填的，
+# 因此结果一律走缓存。键是 (group_openid, path) —— openid 按应用隔离，同一进程内
+# 跑多个应用也不会撞。
+_GROUP_QUERY_CACHE: OrderedDict[tuple[str, str], tuple[float, dict | None]] = (
+    OrderedDict()
+)
+_GROUP_QUERY_CACHE_CAPACITY = 1000
+_GROUP_INFO_PATH = "/v2/groups/{group_openid}/info"
+_GROUP_BOT_STATE_PATH = "/v2/groups/{group_openid}/bot_state"
+# bot_state 里的 allow_proactive_msg 与 recv_msg_setting 是用户随时可改的开关，而它
+# 的主要用途正是「推送前先查一下会不会被拒」，脏读一小时会让这个检查失去意义，所以
+# 它的 TTL 比群资料短得多。
+_GROUP_QUERY_TTL_SECONDS = {_GROUP_INFO_PATH: 3600.0, _GROUP_BOT_STATE_PATH: 300.0}
+# 失败也缓存：群名在入站时回填，机器人被移出群之类会让每条消息都白打一次请求，30 QPM
+# 撑不住。但失败原因分不出来（botpy 只把 message 字符串抛上来），所以负缓存的 TTL
+# 短得多，好让偶发错误自行恢复。
+_GROUP_QUERY_NEGATIVE_TTL_SECONDS = 300.0
+
+
+async def query_group_api(bot: Client, group_openid: str, path: str) -> dict | None:
+    """打一次群维度的只读接口，带 TTL 缓存；失败返回 None。
+
+    返回的是缓存内容的深拷贝：调用方拿到的是「原始字段」，改动它不该污染缓存，
+    而 group_tags 是列表，浅拷贝挡不住原地修改。
+    """
+    key = (group_openid, path)
+    now = time.time()
+    cached = _GROUP_QUERY_CACHE.get(key)
+    if cached is not None:
+        cached_at, payload = cached
+        ttl = (
+            _GROUP_QUERY_TTL_SECONDS[path]
+            if payload is not None
+            else _GROUP_QUERY_NEGATIVE_TTL_SECONDS
+        )
+        if now - cached_at < ttl:
+            _GROUP_QUERY_CACHE.move_to_end(key)
+            return copy.deepcopy(payload)
+        _GROUP_QUERY_CACHE.pop(key, None)
+
+    payload = None
+    try:
+        result = await bot.api._http.request(
+            Route("GET", path, group_openid=group_openid)
+        )
+        if isinstance(result, dict):
+            payload = result
+    except Exception as e:
+        logger.debug(f"[QQOfficial] 群接口调用失败 path={path}: {e}")
+
+    _GROUP_QUERY_CACHE[key] = (now, payload)
+    while len(_GROUP_QUERY_CACHE) > _GROUP_QUERY_CACHE_CAPACITY:
+        # 最久未命中的先出（读命中会 move_to_end）。
+        _GROUP_QUERY_CACHE.popitem(last=False)
+    return copy.deepcopy(payload)
+
+
+async def resolve_group(bot: Client, group_openid: str | None) -> Group | None:
+    """入站时回填群聊数据，供 group_name_display 之类直接读 message_obj.group 的地方使用。
+
+    openid 为空时返回 None（等同于 AstrBotMessage.group_id setter 收到假值的行为），
+    不发请求 —— 否则会打到 /v2/groups/None/info，并让 session_id 变成 None。
+
+    取不到群名就留空 —— 回落成 openid 会让「群名」变成一串 32 位十六进制，进了
+    系统提示词只会误导模型，不如没有。
+    """
+    if not group_openid:
+        return None
+    info = await query_group_api(bot, group_openid, _GROUP_INFO_PATH)
+    name = (info or {}).get("group_name")
+    return Group(
+        group_id=group_openid,
+        # 只认字符串：接口用 null 表示无群名时，str() 会把它变成字面量 "None"。
+        group_name=name.strip() or None if isinstance(name, str) else None,
+    )
 
 
 def _patch_qq_botpy_formdata() -> None:
@@ -215,6 +295,59 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         except Exception as e:
             logger.debug(f"[QQOfficial] 撤回失败 message_id={mid}: {e}")
             return False
+
+    def _current_group_openid(self) -> str:
+        """当前会话的 group_openid；频道 / 私聊场景为空字符串。
+
+        频道消息的 group_id 存的是 channel_id，拿它去打 /v2/groups 必然出错，
+        所以这里只认原始消息上的 group_openid，不走 get_group_id()。
+        """
+        return str(getattr(self.message_obj.raw_message, "group_openid", "") or "")
+
+    async def get_group(self, group_id: str | None = None, **kwargs) -> Group | None:
+        """获取群聊数据。频道消息与私聊返回 None。
+
+        当前会话直接用入站时回填好的对象（见 resolve_group），不重复请求。
+
+        QQ 官方不提供群成员列表接口，group_owner / group_admins / members 恒为
+        None；机器人自己在群里的角色见 get_group_bot_state()。
+        """
+        current = self._current_group_openid()
+        target = str(group_id or "").strip() or current
+        if not target:
+            return None
+        if target == current and self.message_obj.group is not None:
+            return self.message_obj.group
+        return await resolve_group(self.bot, target)
+
+    async def get_group_info(
+        self, group_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """取群的完整资料，比 get_group() 多出简介 / 分类 / 标签 / 人数。
+
+        返回原始字段：group_openid、group_name、group_finger_memo、
+        group_class_text、group_tags、group_member_num。取不到返回 None。
+        """
+        target = str(group_id or "").strip() or self._current_group_openid()
+        if not target:
+            return None
+        return await query_group_api(self.bot, target, _GROUP_INFO_PATH)
+
+    async def get_group_bot_state(
+        self, group_id: str | None = None
+    ) -> dict[str, Any] | None:
+        """取机器人自己在该群的状态，取不到返回 None。
+
+        返回原始字段：member_openid、joined_at（RFC3339）、allow_proactive_msg、
+        recv_msg_setting（all / only_mention / mention_and_context）、
+        member_role（member / owner / admin）。
+
+        allow_proactive_msg 尤其有用：为 false 时主动推送会被拒，值得在推送前先查。
+        """
+        target = str(group_id or "").strip() or self._current_group_openid()
+        if not target:
+            return None
+        return await query_group_api(self.bot, target, _GROUP_BOT_STATE_PATH)
 
     async def send_streaming(self, generator, use_fallback: bool = False):
         """流式输出仅支持消息列表私聊（C2C），其他消息源退化为普通发送"""
