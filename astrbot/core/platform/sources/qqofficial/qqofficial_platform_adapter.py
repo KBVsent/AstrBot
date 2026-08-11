@@ -989,27 +989,27 @@ class QQOfficialPlatformAdapter(Platform):
                 # 按 <@id> 在正文中的真实位置交错构造 At / Plain 段，保留 @ 的原始顺序，
                 content = message.content or ""
                 ordered: list[BaseMessageComponent] = []
+
+                def append_text_seg(seg: str) -> None:
+                    # 丢弃文本段两端空白：<@bot> 标记两侧的空格属于
+                    # @ 语法本身，不 strip 会让紧随其后的 Plain 以空格开头
+                    seg = seg.strip()
+                    if seg:
+                        ordered.append(
+                            Plain(QQOfficialPlatformAdapter._parse_face_message(seg))
+                        )
+
                 bot_at_inserted = False
                 last_idx = 0
                 for m in re.finditer(r"<@!?([^>]+)>", content):
-                    text_seg = content[last_idx : m.start()]
+                    append_text_seg(content[last_idx : m.start()])
                     last_idx = m.end()
-                    if text_seg:
-                        ordered.append(
-                            Plain(
-                                QQOfficialPlatformAdapter._parse_face_message(text_seg)
-                            )
-                        )
                     at_comp = mention_at_map.get(m.group(1))
                     if at_comp is not None:
                         ordered.append(at_comp)
                         if str(getattr(at_comp, "qq", "")) == str(abm.self_id):
                             bot_at_inserted = True
-                tail_seg = content[last_idx:]
-                if tail_seg:
-                    ordered.append(
-                        Plain(QQOfficialPlatformAdapter._parse_face_message(tail_seg))
-                    )
+                append_text_seg(content[last_idx:])
                 # message_str 保留全部正文（剥离所有 @ 标记后）
                 plain_content_raw = content
                 for mention_id in mention_at_map:
