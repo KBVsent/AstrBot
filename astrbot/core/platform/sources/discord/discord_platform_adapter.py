@@ -15,6 +15,7 @@ from astrbot.api.event import MessageChain
 from astrbot.api.message_components import At, File, Image, Plain, Record
 from astrbot.api.platform import (
     AstrBotMessage,
+    Group,
     MessageMember,
     MessageType,
     Platform,
@@ -108,6 +109,7 @@ class DiscordPlatformAdapter(Platform):
         if channel:
             message_obj.type = self._get_message_type(channel)
             message_obj.group_id = self._get_channel_id(channel)
+            self._attach_group(message_obj, channel)
         else:
             logger.error(
                 f"[Discord] Proactive send failed: cannot resolve channel {channel_id_str} "
@@ -237,6 +239,33 @@ class DiscordPlatformAdapter(Platform):
         """根据 channel 对象获取ID"""
         return str(getattr(channel, "id", None))
 
+    def _attach_group(
+        self,
+        abm: AstrBotMessage,
+        channel: Messageable | GuildChannel | PrivateChannel | None,
+    ) -> None:
+        """把频道名补进 abm.group；取不到名字时保持调用方已设好的 group 不变。
+
+        group_name 填频道名（与 group_id 存的 channel_id 严格对应）；服务器名不进
+        这里，改由事件 extras 的 guild_name 承载，见 handle_msg。
+        """
+        if channel is None:
+            return
+        name = getattr(channel, "name", None)
+        if not isinstance(name, str) or not name:
+            return
+        channel_id = self._get_channel_id(channel)
+        if channel_id == "None":
+            return
+        # 必须经由 channel.guild 取 owner_id。Thread 与 GroupChannel 自身也有owner_id
+        # 但那是帖子创建者 / 群组私聊发起人，不是服务器所有者。
+        owner_id = getattr(getattr(channel, "guild", None), "owner_id", None)
+        abm.group = Group(
+            group_id=channel_id,
+            group_name=name,
+            group_owner=str(owner_id) if owner_id else None,
+        )
+
     def _convert_message_to_abm(self, data: dict) -> AstrBotMessage:
         """将普通消息转换为 AstrBotMessage"""
         message = data["message"]
@@ -272,6 +301,7 @@ class DiscordPlatformAdapter(Platform):
         abm = AstrBotMessage()
         abm.type = self._get_message_type(message.channel)
         abm.group_id = self._get_channel_id(message.channel)
+        self._attach_group(abm, message.channel)
         abm.message_str = content
         abm.sender = MessageMember(
             user_id=str(message.author.id),
@@ -327,6 +357,7 @@ class DiscordPlatformAdapter(Platform):
         if channel is not None:
             abm.type = self._get_message_type(channel, interaction.guild_id)
             abm.group_id = self._get_channel_id(channel)
+            self._attach_group(abm, channel)
         else:
             abm.type = (
                 MessageType.GROUP_MESSAGE
@@ -409,6 +440,13 @@ class DiscordPlatformAdapter(Platform):
         # on_message（@bot/DM）路径无此信息，user_locale 为 None 不写。
         if user_locale:
             message_event.set_extra("user_locale", user_locale)
+
+        # 服务器名放 extras：Group.group_name 已经被频道名占用（与 group_id 对应），
+        # 而「哪个服务器的哪个频道」对业务侧同样有用。私聊没有 guild，不写。
+        guild = getattr(message.raw_message, "guild", None)
+        if guild is not None:
+            message_event.set_extra("guild_id", str(guild.id))
+            message_event.set_extra("guild_name", guild.name)
 
         if self.client.user is None:
             logger.error(
@@ -1234,6 +1272,7 @@ class DiscordPlatformAdapter(Platform):
             if channel is not None:
                 abm.type = self._get_message_type(channel, ctx.guild_id)
                 abm.group_id = self._get_channel_id(channel)
+                self._attach_group(abm, channel)
             else:
                 # 防守式兜底：channel 取不到时，仍能根据 guild_id/channel_id 推断会话信息
                 abm.type = (

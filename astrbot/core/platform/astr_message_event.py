@@ -536,4 +536,5 @@ class AstrMessageEvent(abc.ABC):
         - aiocqhttp(OneBotv11)
         - line(仅群名与群头像，无成员列表)
         - qq_official(仅群名，无成员列表)
+        - discord(group_name 为频道名，服务器名见 extras 的 guild_name)
         """

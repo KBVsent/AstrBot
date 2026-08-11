@@ -17,7 +17,7 @@ from astrbot.api.message_components import (
     Record,
     Reply,
 )
-from astrbot.api.platform import AstrBotMessage, At, PlatformMetadata
+from astrbot.api.platform import AstrBotMessage, At, Group, PlatformMetadata
 from astrbot.core.utils.media_utils import (
     MEDIA_MIME_EXTENSIONS,
     MediaResolver,
@@ -446,6 +446,35 @@ class DiscordPlatformEvent(AstrMessageEvent):
                 )
         except Exception as e:
             logger.error(f"[Discord] 添加反应失败: {e}")
+
+    async def get_group(self, group_id: str | None = None, **kwargs) -> Group | None:
+        """获取频道数据。group_name 是频道名，服务器名见 extras 的 guild_name。
+
+        频道名在入站时就已填好，当前会话直接复用。传别的 channel_id 时走 pycord 的
+        本地频道缓存（由 GUILD_CREATE 填充），全程不打接口；缓存里没有（bot 不在该
+        服务器 / 频道不存在 / 缓存尚未就绪）返回 None，不退化成 HTTP 拉取。
+
+        成员列表需要 members 特权 intent 且依赖缓存完整性。
+        """
+        target = str(group_id or "").strip()
+        if not target or target == self.get_group_id():
+            # 指向当前会话，直接复用入站对象 —— 但私聊必须返回 None（基类约定）。
+            return None if self.is_private_chat() else self.message_obj.group
+        try:
+            channel = self.client.get_channel(int(target))
+        except (ValueError, TypeError):
+            return None
+        # get_channel 未命中时返回 None；命中也可能是没有 name 的私聊类频道。
+        name = getattr(channel, "name", None)
+        if not isinstance(name, str) or not name:
+            return None
+        # 经由 channel.guild 取：Thread 自身的 owner_id 是帖子创建者，不是服务器所有者。
+        owner_id = getattr(getattr(channel, "guild", None), "owner_id", None)
+        return Group(
+            group_id=target,
+            group_name=name,
+            group_owner=str(owner_id) if owner_id else None,
+        )
 
     def get_command_mention_map(self) -> dict[str, str]:
         """返回「命令名/别名 → Discord 原生 mention（</slash_name:id>）」映射。

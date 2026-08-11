@@ -307,7 +307,7 @@
         },
         "group_name_display": {
           "description": "Display Group Name",
-          "hint": "When enabled, group name information will be included in the prompt on supported platforms (OneBot v11, LINE, QQ Official)."
+          "hint": "When enabled, group name information will be included in the prompt on supported platforms (OneBot v11, LINE, QQ Official, Discord)."
         },
         "datetime_system_prompt": {
           "description": "Real-world Time Awareness",
