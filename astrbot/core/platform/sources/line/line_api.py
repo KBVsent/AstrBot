@@ -564,6 +564,25 @@ class LineAPIClient:
             f"{LINE_API_BASE}/v2/bot/room/{room_id}/member/{user_id}"
         )
 
+    async def get_group_summary(self, group_id: str) -> dict[str, str | None] | None:
+        """取群聊的名称与头像，键为 group_name / group_avatar；取不到返回 None。
+
+        该端点对普通未认证账号同样开放
+
+        多人聊天没有对应端点，也没有名称这个概念，传 roomId 只会 404。
+        bot 已退群或被移出同样是 404，这在长跑里是常态，不做重试。
+        """
+        data = await self._get_profile(
+            f"{LINE_API_BASE}/v2/bot/group/{group_id}/summary"
+        )
+        if not data:
+            return None
+        name = str(data.get("groupName", "")).strip()
+        avatar = str(data.get("pictureUrl", "")).strip()
+        if not name:
+            return None
+        return {"group_name": name, "group_avatar": avatar or None}
+
     async def get_user_language(self, user_id: str) -> str | None:
         """取用户的界面语言（BCP 47，如 ja / zh-Hant）。取不到返回 None。
 

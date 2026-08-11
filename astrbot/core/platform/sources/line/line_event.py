@@ -31,6 +31,7 @@ from astrbot.api.message_components import (
 )
 from astrbot.core import astrbot_config
 from astrbot.core.platform.astr_message_event import MessageType
+from astrbot.core.platform.astrbot_message import Group
 from astrbot.core.utils.media_utils import MediaResolver
 
 from .components import LineFlex, LineFlexMedia, LineQuickReply, LineRawMessage
@@ -741,6 +742,31 @@ class LineMessageEvent(AstrMessageEvent):
         """取 postback 的 params（日期时间选择器 / rich menu 切换等会带）。"""
         params = self._postback_payload().get("params")
         return dict(params) if isinstance(params, dict) else {}
+
+    # ------------------------------------------------------------ 群聊
+
+    async def get_group(self, group_id: str | None = None, **kwargs) -> Group | None:
+        """取群聊数据。LINE 只能给出群名与群头像。
+
+        members / group_owner / group_admins 恒为 None：成员 ID 列表端点仅认证与
+        Premium 账号可用，群主与管理员则是 LINE 里根本不存在的概念。
+
+        多人聊天（room）没有名称，group_name 回落为容器 id。
+        """
+        current = str(self.get_group_id() or "")
+        target = str(group_id or "").strip() or current
+        if not target:
+            return None
+        if target == current and self.message_obj.group is not None:
+            # 入站时已按 TTL 缓存填好，无谓再打一次 API。
+            return self.message_obj.group
+
+        summary = await self.line_api.get_group_summary(target) or {}
+        return Group(
+            group_id=target,
+            group_name=summary.get("group_name") or target,
+            group_avatar=summary.get("group_avatar"),
+        )
 
     # ------------------------------------------------------------ 体验
 

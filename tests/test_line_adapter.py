@@ -7,6 +7,8 @@
 - 发送结果：只有 2xx 算成功；400 只在 reply 且明确指向 reply token 时才归类为 token 失效。
 - 引用：quoteToken 按聊天作用域隔离；bot 自己发出的文本被引用时能从本地缓存恢复。
 - 入站：@全体映射为标准 AtAll；mention 偏移按 UTF-16 计量。
+- 群摘要：群名与群头像在入站时回填并按 TTL 缓存；多人聊天没有该端点，不发请求；
+  get_group() 复用入站数据，只有查别的群才打 API。
 - Postback：走 raw_message（无消息组件），且显式禁止默认 LLM。
 - 媒体：外链音频依赖 Record.duration；图床 URL 不被适配器校验，而自己拼的兜底 URL 要查
   HTTPS；MediaResolver(max_bytes=...) 能中止超限下载。
@@ -96,6 +98,11 @@ def make_adapter() -> LinePlatformAdapter:
     adapter.line_api.get_user_display_name = fake_display_name  # type: ignore[method-assign]
     adapter.line_api.get_group_member_display_name = fake_display_name  # type: ignore[method-assign]
     adapter.line_api.get_room_member_display_name = fake_display_name  # type: ignore[method-assign]
+
+    async def fake_group_summary(group_id: str) -> dict[str, str | None]:
+        return {"group_name": f"Group of {group_id}", "group_avatar": "https://a/i.png"}
+
+    adapter.line_api.get_group_summary = fake_group_summary  # type: ignore[method-assign]
     return adapter
 
 
@@ -355,6 +362,109 @@ async def test_inbound_mention_all_maps_to_at_all():
     abm = await adapter.convert_message(event)
     assert abm is not None
     assert isinstance(abm.message[0], AtAll)
+
+
+@pytest.mark.asyncio
+async def test_inbound_group_is_filled_with_summary_and_cached():
+    adapter = make_adapter()
+    calls: list[str] = []
+
+    async def counting_summary(group_id: str) -> dict[str, str | None]:
+        calls.append(group_id)
+        return {"group_name": "試練の地", "group_avatar": "https://a/i.png"}
+
+    adapter.line_api.get_group_summary = counting_summary  # type: ignore[method-assign]
+
+    event = text_event("e1")
+    event["source"] = {"type": "group", "groupId": "G1", "userId": "U1"}
+    first = await adapter.convert_message(event)
+    second = await adapter.convert_message(
+        text_event("e2") | {"source": event["source"]}
+    )
+
+    assert first is not None and first.group is not None
+    assert first.group.group_name == "試練の地"
+    assert first.group.group_avatar == "https://a/i.png"
+    assert second is not None and second.group is not None
+    assert second.group.group_name == "試練の地"
+    # 群名走 TTL 缓存：同一个群的第二条消息不再打 API。
+    assert calls == ["G1"]
+
+
+@pytest.mark.asyncio
+async def test_inbound_room_keeps_id_as_name_without_api_call():
+    """多人聊天没有名称，也没有 summary 端点 —— 不能白打一次必然 404 的请求。"""
+    adapter = make_adapter()
+
+    async def forbidden_summary(group_id: str) -> dict[str, str | None]:
+        raise AssertionError(f"room 不应请求群摘要: {group_id}")
+
+    adapter.line_api.get_group_summary = forbidden_summary  # type: ignore[method-assign]
+
+    event = text_event("e1")
+    event["source"] = {"type": "room", "roomId": "R1", "userId": "U1"}
+    abm = await adapter.convert_message(event)
+
+    assert abm is not None and abm.group is not None
+    assert abm.group.group_id == "R1"
+    assert abm.group.group_name == "R1"
+    assert abm.group.group_avatar is None
+
+
+@pytest.mark.asyncio
+async def test_inbound_group_falls_back_to_id_when_summary_unavailable():
+    adapter = make_adapter()
+
+    async def no_summary(group_id: str) -> None:  # noqa: ARG001
+        return None
+
+    adapter.line_api.get_group_summary = no_summary  # type: ignore[method-assign]
+
+    event = text_event("e1")
+    event["source"] = {"type": "group", "groupId": "G1", "userId": "U1"}
+    abm = await adapter.convert_message(event)
+
+    assert abm is not None and abm.group is not None
+    assert abm.group.group_name == "G1"
+
+
+@pytest.mark.asyncio
+async def test_get_group_reuses_inbound_data_and_queries_other_groups():
+    adapter = make_adapter()
+    calls: list[str] = []
+
+    async def counting_summary(group_id: str) -> dict[str, str | None]:
+        calls.append(group_id)
+        return {"group_name": f"name-{group_id}", "group_avatar": None}
+
+    adapter.line_api.get_group_summary = counting_summary  # type: ignore[method-assign]
+
+    event = text_event("e1")
+    event["source"] = {"type": "group", "groupId": "G1", "userId": "U1"}
+    abm = await adapter.convert_message(event)
+    assert abm is not None
+    line_event = adapter.create_event(abm)
+
+    current = await line_event.get_group()
+    assert current is not None and current.group_name == "name-G1"
+    assert calls == ["G1"]  # 当前群直接用入站时填好的数据
+
+    other = await line_event.get_group("G2")
+    assert other is not None and other.group_name == "name-G2"
+    assert calls == ["G1", "G2"]
+
+    # LINE 给不出这些：成员列表要认证账号，群主 / 管理员则根本不存在。
+    assert other.members is None
+    assert other.group_owner is None
+    assert other.group_admins is None
+
+
+@pytest.mark.asyncio
+async def test_get_group_returns_none_in_direct_chat():
+    adapter = make_adapter()
+    abm = await adapter.convert_message(text_event("e1"))
+    assert abm is not None
+    assert await adapter.create_event(abm).get_group() is None
 
 
 @pytest.mark.asyncio

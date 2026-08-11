@@ -534,4 +534,5 @@ class AstrMessageEvent(abc.ABC):
         适配情况:
 
         - aiocqhttp(OneBotv11)
+        - line(仅群名与群头像，无成员列表)
         """

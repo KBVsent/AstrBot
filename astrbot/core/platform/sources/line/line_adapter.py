@@ -103,7 +103,8 @@ def _evict_profile_cache(
 ) -> None:
     """清掉过期项，并把缓存压回容量上限内 —— 否则长跑大群会无界增长。
 
-    昵称与界面语言两个缓存共用：都从同一个 profile 端点派生，新鲜度要求一致。
+    昵称、界面语言与群摘要三个缓存共用：都是随时可能被用户改动的展示资料，
+    新鲜度要求一致。
     """
     expired = [
         key
@@ -166,6 +167,10 @@ class LinePlatformAdapter(Platform):
         )
         # user_id -> (取回时刻, BCP 47 语言码或 None)。缓存 None 是有意的，见 _resolve_language。
         self._language_cache: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
+        # group_id -> (取回时刻, (群名或 None, 群头像或 None))。见 _resolve_group_summary。
+        self._group_summary_cache: OrderedDict[
+            str, tuple[float, tuple[str | None, str | None]]
+        ] = OrderedDict()
 
         channel_access_token = str(platform_config.get("channel_access_token", ""))
         channel_secret = str(platform_config.get("channel_secret", ""))
@@ -390,7 +395,14 @@ class LinePlatformAdapter(Platform):
         if source_type in {"group", "room"}:
             abm.type = MessageType.GROUP_MESSAGE
             container_id = group_id or room_id
-            abm.group = Group(group_id=container_id, group_name=container_id)
+            group_name, group_avatar = await self._resolve_group_summary(
+                source_type, group_id
+            )
+            abm.group = Group(
+                group_id=container_id,
+                group_name=group_name or container_id,
+                group_avatar=group_avatar,
+            )
             abm.session_id = container_id
             sender_id = user_id or container_id
         elif source_type == "user":
@@ -728,6 +740,37 @@ class LinePlatformAdapter(Platform):
         self._nickname_cache[cache_key] = (now, name)
         _evict_profile_cache(self._nickname_cache, now)
         return name
+
+    # ------------------------------------------------------------ 群摘要
+
+    async def _resolve_group_summary(
+        self, source_type: str, group_id: str
+    ) -> tuple[str | None, str | None]:
+        """取群名与群头像，带 TTL 缓存；取不到返回 (None, None)。
+
+        只对 group 生效：多人聊天（room）没有名称，LINE 也没有对应端点。
+        失败结果同样入缓存 —— bot 已退群之类是稳定状态，不该每条消息都白打一次。
+        """
+        if source_type != "group" or not group_id:
+            return (None, None)
+
+        now = time.time()
+        cached = self._group_summary_cache.get(group_id)
+        if cached is not None:
+            if now - cached[0] < _NICKNAME_TTL_SECONDS:
+                self._group_summary_cache.move_to_end(group_id)
+                return cached[1]
+            self._group_summary_cache.pop(group_id, None)
+
+        summary = await self.line_api.get_group_summary(group_id)
+        resolved = (
+            (summary.get("group_name"), summary.get("group_avatar"))
+            if summary
+            else (None, None)
+        )
+        self._group_summary_cache[group_id] = (now, resolved)
+        _evict_profile_cache(self._group_summary_cache, now)
+        return resolved
 
     # ------------------------------------------------------------ 界面语言
 
