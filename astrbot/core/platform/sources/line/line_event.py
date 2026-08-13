@@ -743,6 +743,16 @@ class LineMessageEvent(AstrMessageEvent):
         params = self._postback_payload().get("params")
         return dict(params) if isinstance(params, dict) else {}
 
+    def get_message_outline(self) -> str:
+        """postback 没有消息链，构造摘要供日志与链路追踪使用"""
+        if not self.is_postback():
+            return super().get_message_outline()
+        data = str(self._postback_payload().get("data", "")) or "?"
+        params = self.get_postback_params()
+        if params:
+            return f"[Postback] data={data} params={params}"
+        return f"[Postback] data={data}"
+
     # ------------------------------------------------------------ 群聊
 
     async def get_group(self, group_id: str | None = None, **kwargs) -> Group | None:

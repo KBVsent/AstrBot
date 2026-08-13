@@ -512,6 +512,52 @@ async def test_postback_uses_raw_message_and_blocks_default_llm():
 
 
 @pytest.mark.asyncio
+async def test_postback_outline_shows_data_and_params():
+    """postback 没有消息链，入站日志要靠 outline 显示 data / params 而不是留空。"""
+    adapter = make_adapter()
+
+    with_params = await adapter.convert_message(
+        {
+            "type": "postback",
+            "webhookEventId": "p1",
+            "replyToken": "reply-token",
+            "timestamp": 1,
+            "source": {"type": "user", "userId": "U1"},
+            "postback": {"data": "mcmai|r|/b50", "params": {"status": "SUCCESS"}},
+        }
+    )
+    assert with_params is not None
+    assert adapter.create_event(with_params).get_message_outline() == (
+        "[Postback] data=mcmai|r|/b50 params={'status': 'SUCCESS'}"
+    )
+
+    without_params = await adapter.convert_message(
+        {
+            "type": "postback",
+            "webhookEventId": "p2",
+            "replyToken": "reply-token",
+            "timestamp": 1,
+            "source": {"type": "user", "userId": "U1"},
+            "postback": {"data": "mcmai|r|/b50"},
+        }
+    )
+    assert without_params is not None
+    assert (
+        adapter.create_event(without_params).get_message_outline()
+        == "[Postback] data=mcmai|r|/b50"
+    )
+
+
+@pytest.mark.asyncio
+async def test_message_event_outline_is_unchanged():
+    """普通消息事件仍走基类的消息链摘要，不受 postback 分支影响。"""
+    adapter = make_adapter()
+    abm = await adapter.convert_message(text_event("e1"))
+    assert abm is not None
+    assert adapter.create_event(abm).get_message_outline() == abm.message_str
+
+
+@pytest.mark.asyncio
 async def test_message_event_is_not_postback():
     adapter = make_adapter()
     abm = await adapter.convert_message(text_event("e1"))
