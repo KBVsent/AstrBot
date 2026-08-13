@@ -73,8 +73,21 @@ class DiscordPlatformAdapter(Platform):
         self.message_mode = self.config.get("discord_message_mode", "mention_and_dm")
         if self.message_mode not in ("mention_and_dm", "full_message"):
             self.message_mode = "mention_and_dm"
-        # 空字符串（schema 默认）按"无调试服务器"处理，走全局注册
-        self.guild_id = self.config.get("discord_guild_id_for_debug") or None
+        # 空字符串（schema 默认）按"无调试服务器"处理，走全局注册。
+        # 用 int() 校验后存回十进制字符串：Pycord sync 末尾用 HTTP 响应里的 str guild_id
+        # 去比 cmd.guild_ids（bot.py find 谓词）。存 int 会让回填永远 miss，c.id 留空。
+        raw_guild_id = self.config.get("discord_guild_id_for_debug") or None
+        if raw_guild_id:
+            try:
+                self.guild_id = str(int(raw_guild_id))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"[Discord] Invalid discord_guild_id_for_debug {raw_guild_id!r}; "
+                    "debug guild scope ignored."
+                )
+                self.guild_id = None
+        else:
+            self.guild_id = None
         self.activity_name = self.config.get("discord_activity_name", None)
         self.shutdown_event = asyncio.Event()
         self._polling_task = None
@@ -587,8 +600,9 @@ class DiscordPlatformAdapter(Platform):
         """按 discord_command_register 决定是否/如何把斜杠指令同步到 Discord。
 
         作用域由 discord_guild_id_for_debug 决定（设了→guild 即时；留空→全局 + user install）。
-        无论是否真正 sync，都先 build + add_application_command：Pycord 路由进来的交互按
-        id 查不到会回退按指令名匹配 pending 指令，故"build 但跳过 sync"时交互仍可响应。
+        每次都先 build + add_application_command，把带 callback 的本地对象放进 pending。
+        跳过对 Discord 的写入、或 sync 失败时，仍须把已有 command id 写入
+        Pycord 的 _application_commands（按 id 路由的主路径）。
         """
         mode = self.command_register_mode
 
@@ -621,29 +635,41 @@ class DiscordPlatformAdapter(Platform):
             return
 
         fingerprint = self._compute_command_fingerprint(built)
+        skip_sync = False
+        effective_ids: dict[str, int] | None = None
         if (
             mode == "startup_if_changed"
             and fingerprint == self._load_synced_fingerprint()
         ):
-            # 指纹命中 ⇒ 命令集/scope 未变 ⇒ 无需重新同步（写）。
             stored_ids = self._load_command_ids()
             live_ids = await self._fetch_live_command_ids()
-            if live_ids is not None:
-                # 只保留本轮 build 的指令，忽略其它作用域/历史遗留的孤儿命令。
-                effective_ids = {
-                    name: cmd_id
-                    for name, cmd_id in live_ids.items()
-                    if name in self._slash_to_cmd_name
-                }
+            built_names = set(self._slash_to_cmd_name)
+            if live_ids is not None and built_names <= set(live_ids):
+                # 本轮指令都在远端；多余孤儿忽略，避免每次启动都 PUT。
+                effective_ids = {name: live_ids[name] for name in built_names}
                 if effective_ids != stored_ids:
-                    # 自愈：把权威 id 写回本地缓存，纠正可能被覆盖的旧值。
                     self._store_command_ids(effective_ids)
                     logger.info(
                         "[Discord] Reconciled stored command ids with live Discord state."
                     )
+                skip_sync = True
+            elif live_ids is None and built_names <= set(stored_ids):
+                # GET 失败但本地缓存覆盖了本轮指令，用缓存 hydrate，避免无谓写入。
+                effective_ids = {name: stored_ids[name] for name in built_names}
+                skip_sync = True
+            elif live_ids is not None:
+                logger.warning(
+                    "[Discord] Live Discord commands differ from local build; syncing "
+                    f"(live={sorted(live_ids)}, local={sorted(built_names)})."
+                )
             else:
-                effective_ids = stored_ids
-            self._apply_command_ids(effective_ids)
+                logger.warning(
+                    "[Discord] Live command ids unavailable and stored ids incomplete; "
+                    "syncing."
+                )
+
+        if skip_sync and effective_ids is not None:
+            self._bind_command_ids(built, effective_ids)
             logger.info(
                 f"[Discord] Slash commands unchanged since last sync; skipping sync "
                 f"({len(built)} commands remain routable)."
@@ -652,10 +678,25 @@ class DiscordPlatformAdapter(Platform):
 
         if await self._sync_commands_guarded():
             self._store_synced_fingerprint(fingerprint)
-            ids = {c.name: c.id for c in built if c.id}
-            self._store_command_ids(ids)
-            self._apply_command_ids(ids)
+            ids: dict[str, int] = {}
+            for command in built:
+                if not command.id:
+                    continue
+                try:
+                    ids[command.name] = int(command.id)
+                except (TypeError, ValueError):
+                    continue
+            if ids:
+                # 合并而非覆盖：Pycord 只回填了部分指令时，别把其余指令的存盘 id 丢掉。
+                # 残留的旧条目无害，所有消费点都先与本轮 build 的指令名取交集。
+                self._store_command_ids({**self._load_command_ids(), **ids})
+                self._bind_command_ids(built, ids)
+            else:
+                # Pycord 回填全 miss 时不要用空 dict 把存盘 id 抹掉。
+                self._bind_stored_ids(built)
             logger.info("[Discord] Command synchronization completed.")
+        else:
+            self._bind_stored_ids(built)
 
     def _build_and_add_commands(self) -> list[discord.SlashCommand] | None:
         """按指令注册表（discord_command_schemas）构建并 add_application_command。
@@ -890,6 +931,41 @@ class DiscordPlatformAdapter(Platform):
                     f"[Discord] Failed to persist command ids: {e}. "
                     "Command mentions may be unavailable until next sync.",
                 )
+
+    def _bind_command_ids(
+        self, commands: list[discord.SlashCommand], ids: dict[str, int]
+    ) -> None:
+        """把 slash_name→id 写进 Pycord 路由表，并刷新 mention map。
+
+        commands 为本轮 build 出的斜杠指令，ids 为 slash_name → command id。
+        """
+        cache = getattr(self.client, "_application_commands", None)
+        if isinstance(cache, dict):
+            for command in commands:
+                cmd_id = ids.get(command.name)
+                if cmd_id is None:
+                    continue
+                command.id = cmd_id
+                # interaction.data["id"] 是原始 JSON 雪花，永远是 str；这是承重键。
+                cache[str(cmd_id)] = command
+                # 同时按 command.id（int）建键：Pycord 自己回填时存的是 HTTP 响应里的
+                # str，而 remove_application_command 按 command.id 反查，两种键都留着
+                # 才不会漏。
+                cache[cmd_id] = command
+        self._apply_command_ids(ids)
+
+    def _bind_stored_ids(self, commands: list[discord.SlashCommand]) -> bool:
+        """用存盘 id 兜底绑定本轮指令；存盘未覆盖全部指令时不动，返回是否绑定。
+
+        用于 sync 失败、或 sync 成功但 Pycord 回填 miss 的场景：此时 Discord 上的指令
+        仍在，存盘 id 是唯一可用来源，绑上比留空表更接近可用状态。
+        """
+        stored_ids = self._load_command_ids()
+        names = set(self._slash_to_cmd_name)
+        if not names <= set(stored_ids):
+            return False
+        self._bind_command_ids(commands, {name: stored_ids[name] for name in names})
+        return True
 
     def _apply_command_ids(self, ids: dict[str, int]) -> None:
         """据 slash_name→id 构建 client.command_mention_map。
