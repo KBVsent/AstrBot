@@ -154,7 +154,7 @@ async def rename_config_profile(
     _auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
-    service.rename_profile(config_id, payload.name)
+    await service.rename_profile(config_id, payload.name)
     return ok(message="更新成功")
 
 
@@ -164,7 +164,7 @@ async def delete_config_profile(
     _auth: AuthContext = Depends(require_config_scope),
     service: ConfigProfileService = Depends(get_service),
 ):
-    service.delete_profile(config_id)
+    await service.delete_profile(config_id)
     return ok(message="删除成功")
 
 
@@ -335,7 +335,7 @@ async def delete_dashboard_alias_config_profile(
     if not config_id:
         return _alias_error("缺少配置文件 ID")
     try:
-        service.delete_profile(str(config_id))
+        await service.delete_profile(str(config_id))
         return ok(message="删除成功")
     except ValueError as exc:
         return _alias_error(str(exc))
@@ -352,7 +352,7 @@ async def rename_dashboard_alias_config_profile(
     if not config_id:
         return _alias_error("缺少配置文件 ID")
     try:
-        service.rename_profile(str(config_id), body.get("name"))
+        await service.rename_profile(str(config_id), body.get("name"))
         return ok(message="更新成功")
     except ValueError as exc:
         return _alias_error(str(exc))

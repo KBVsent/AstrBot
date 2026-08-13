@@ -172,6 +172,8 @@ class AstrBotCoreLifecycle:
             LogManager.configure_trace_logger(self.astrbot_config)
 
         await self.db.initialize()
+        if sp.db_helper is self.db:
+            await sp.initialize()
 
         await html_renderer.initialize()
 
@@ -185,6 +187,7 @@ class AstrBotCoreLifecycle:
             ucr=self.umop_config_router,
             sp=sp,
         )
+        await self.astrbot_config_mgr.initialize()
         self.temp_dir_cleaner = TempDirCleaner(
             max_size_getter=lambda: self.astrbot_config_mgr.default_conf.get(
                 TempDirCleaner.CONFIG_KEY,
@@ -403,6 +406,8 @@ class AstrBotCoreLifecycle:
         await self.provider_manager.terminate()
         await self.platform_manager.terminate()
         await self.kb_manager.terminate()
+        if sp.db_helper is self.db:
+            await sp.close()
         self.dashboard_shutdown_event.set()
 
         # 落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），避免优雅关闭丢失最后一个窗口
@@ -438,6 +443,8 @@ class AstrBotCoreLifecycle:
         await self.provider_manager.terminate()
         await self.platform_manager.terminate()
         await self.kb_manager.terminate()
+        if sp.db_helper is self.db:
+            await sp.close()
         self.dashboard_shutdown_event.set()
 
         # 重启会通过 os.execv 替换进程，先落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），
