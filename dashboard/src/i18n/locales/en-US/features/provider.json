@@ -5,6 +5,8 @@
     "title": "Service Providers",
     "settings": "Settings",
     "addProvider": "Add Provider",
+    "deleteProvider": "Delete provider",
+    "selectHint": "Please select a provider",
     "providerType": "Provider Type",
     "tabs": {
       "all": "All",
@@ -100,6 +102,7 @@
     "save": "Save Configuration",
     "saveAndFetchModels": "Save and Fetch Models",
     "fetchModels": "Fetch Model List",
+    "getApiKey": "Get API Key",
     "saveSuccess": "Provider source saved successfully",
     "saveError": "Failed to save provider source",
     "deleteConfirm": "Are you sure you want to delete provider source {id}? This will also delete all associated model configurations.",
