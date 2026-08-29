@@ -242,7 +242,7 @@ class QQOfficialWebhook:
             try:
                 func = connection.parser[event]
             except KeyError:
-                logger.error("_parser unknown event %s.", event)
+                logger.debug("botpy parser has no handler for event %s.", event)
             else:
                 func(msg)
                 # interaction_create 在 webhook 模式下 ack code 必须放进 HTTP
