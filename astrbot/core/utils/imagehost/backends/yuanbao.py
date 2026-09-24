@@ -2,6 +2,9 @@
 
 需在 image_host 配置项里提供登录 Cookie（``cookie``，从浏览器 genUploadInfo 请求里复制完整 Cookie 头）。
 上限 20MB。返回的是 6 小时有效期的签名 URL——即时下载转存，故足够用。
+
+直链优先向元宝服务端换取：服务端签发的约 950 字符，自己用 encryptToken 签出来要 1520+。
+QQ 官方 markdown 的图片 URL 超过 1495 字符就不渲染（2026-09-23 实测），长的那条过不去。
 """
 
 from __future__ import annotations
@@ -11,6 +14,7 @@ import hmac
 import time
 import urllib.parse
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +32,15 @@ _COMMIT_TAG = "0d878d3b"
 _UPLOAD_ENDPOINT = "accelerate"  # 上传走全球加速
 _OUTPUT_ENDPOINT = "regional"  # 直链走地域节点
 _SIGNED_URL_TTL = 6 * 60 * 60  # 签名直链有效期（秒）
+# 换短直链的超时。实测这一跳在 300ms 量级，给到秒级已是十几倍余量；
+# 它只是降级点而非必经步骤，超时后拿长链继续，所以宁可早放弃也不要挂住发送链路。
+_RESOURCE_TIMEOUT = 5.0
+# 换短直链专用的共享线程池。必须跨调用共享：每次上传新建一个池，线程数就会跟着并发量涨。
+# 池满时新任务排队，最坏退化成串行，而取结果处有超时兜底，不会把上传挂住。
+# 线程按需创建，没启用元宝图床时不占线程。
+_SHORT_URL_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="yuanbao-short-url"
+)
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
@@ -236,6 +249,34 @@ class YuanbaoImageHost:
             headers["X-device-id"] = device_id
         return headers
 
+    def _resolve_short_url(self, info: dict[str, Any]) -> str | None:
+        """拿 resourceUrl 向元宝服务端换一条更短的签名直链，失败返回 None。
+
+        resourceUrl 本身要带 Cookie 才认（匿名 401），但它会 303 跳到一条匿名可读的
+        COS 直链。这条由服务端签发，security token 只有 512 字符，而 genUploadInfo
+        发给前端的 encryptToken 是 1088，最终长度 950 对 1520。两条都是 6 小时有效。
+
+        这一跳只依赖对象 key，不依赖对象已存在（传之前调也能拿到可用的签名），
+        所以调用方让它和 PUT 并发，300ms 的往返基本被 PUT 掩盖。
+        """
+        resource_url = str(info.get("resourceUrl") or "").strip()
+        if not resource_url:
+            return None
+        try:
+            resp = httpx.get(
+                resource_url,
+                headers={"Cookie": self.config.cookie, "User-Agent": _UA},
+                timeout=_RESOURCE_TIMEOUT,
+                follow_redirects=False,
+            )
+        except Exception:
+            # 对象此时已经传上去了，换不到短链只是拿不到更短的那条，
+            # 不该让整次上传失败 —— 任何异常都吞掉，由调用方回退长链。
+            return None
+        if resp.status_code not in (301, 302, 303, 307, 308):
+            return None
+        return resp.headers.get("location", "").strip() or None
+
     def upload_bytes(self, body: bytes, *, filename: str | None = None) -> str:
         if not body:
             raise RuntimeError("无效的图片数据")
@@ -272,6 +313,10 @@ class YuanbaoImageHost:
             (parsed.scheme, host, path, parsed.query, "")
         )
 
+        # 换短直链和 PUT 并发：前者只认 key，不要求对象已存在，等 PUT 完成时它多半
+        # 已经回来了，于是这一跳的耗时不落在总时长上。PUT 失败直接抛出即可，
+        # 那一跳留在池里跑完，线程照常复用。
+        short_url_task = _SHORT_URL_POOL.submit(self._resolve_short_url, info)
         cos_resp = httpx.put(
             cos_endpoint,
             content=body,
@@ -285,8 +330,12 @@ class YuanbaoImageHost:
         )
         if cos_resp.status_code >= 300:
             raise RuntimeError(f"元宝 COS 上传失败 (HTTP {cos_resp.status_code})")
+        try:
+            short_url = short_url_task.result(timeout=_RESOURCE_TIMEOUT)
+        except TimeoutError:
+            short_url = None
 
-        return _make_signed_get_url(info, endpoint=_OUTPUT_ENDPOINT)
+        return short_url or _make_signed_get_url(info, endpoint=_OUTPUT_ENDPOINT)
 
     def upload_file(
         self,
