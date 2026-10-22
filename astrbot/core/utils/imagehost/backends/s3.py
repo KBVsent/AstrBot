@@ -26,9 +26,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.error import HTTPError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+
+from ._http import HTTP_CLIENT, OBJECT_PUT_TIMEOUT
 
 DEFAULT_PREFIX = "temp"
 DEFAULT_EXPIRES_SECONDS = 3600
@@ -300,15 +300,11 @@ class S3NoSdkClient:
             f"Signature={signature}"
         )
 
-        request = Request(
+        resp = HTTP_CLIENT.put(
             self.endpoint_url(key),
-            data=body,
+            content=body,
             headers={**headers, "Authorization": authorization},
-            method="PUT",
+            timeout=OBJECT_PUT_TIMEOUT,
         )
-        try:
-            with urlopen(request) as response:
-                response.read()
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"S3 上传失败: HTTP {exc.code}\n{detail}") from exc
+        if not resp.is_success:
+            raise RuntimeError(f"S3 上传失败: HTTP {resp.status_code}\n{resp.text}")

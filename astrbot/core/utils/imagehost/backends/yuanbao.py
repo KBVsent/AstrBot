@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import httpx
+from ._http import HTTP_CLIENT, OBJECT_PUT_TIMEOUT
 
 DEFAULT_TIMEOUT = 30.0
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -263,7 +263,7 @@ class YuanbaoImageHost:
         if not resource_url:
             return None
         try:
-            resp = httpx.get(
+            resp = HTTP_CLIENT.get(
                 resource_url,
                 headers={"Cookie": self.config.cookie, "User-Agent": _UA},
                 timeout=_RESOURCE_TIMEOUT,
@@ -284,7 +284,7 @@ class YuanbaoImageHost:
             raise RuntimeError(f"图片 {len(body)} 字节超过 20MB 限制")
 
         image_name = filename or "image.jpg"
-        info_resp = httpx.post(
+        info_resp = HTTP_CLIENT.post(
             _GEN_UPLOAD_INFO,
             json={"fileName": image_name, "docFrom": "localDoc", "docOpenId": ""},
             headers=self._upload_info_headers(),
@@ -317,7 +317,7 @@ class YuanbaoImageHost:
         # 已经回来了，于是这一跳的耗时不落在总时长上。PUT 失败直接抛出即可，
         # 那一跳留在池里跑完，线程照常复用。
         short_url_task = _SHORT_URL_POOL.submit(self._resolve_short_url, info)
-        cos_resp = httpx.put(
+        cos_resp = HTTP_CLIENT.put(
             cos_endpoint,
             content=body,
             headers={
@@ -326,7 +326,7 @@ class YuanbaoImageHost:
                 "Host": host,
                 "x-cos-security-token": str(info["encryptToken"]),
             },
-            timeout=120,
+            timeout=OBJECT_PUT_TIMEOUT,
         )
         if cos_resp.status_code >= 300:
             raise RuntimeError(f"元宝 COS 上传失败 (HTTP {cos_resp.status_code})")

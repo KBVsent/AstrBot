@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+from ._http import HTTP_CLIENT
 
 DEFAULT_TIMEOUT = 10.0
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
@@ -72,7 +72,7 @@ class ChatGLMImageHost:
         mime_type = detect_mime(body, filename)
         ext = mime_type.split("/")[-1] if "/" in mime_type else "jpg"
 
-        resp = httpx.post(
+        resp = HTTP_CLIENT.post(
             _ENDPOINT,
             files={"file": (f"image.{ext}", body, mime_type)},
             headers={"User-Agent": _USER_AGENT, "Accept-Encoding": "gzip, deflate, br"},

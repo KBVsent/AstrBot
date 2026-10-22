@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import httpx
+from ._http import HTTP_CLIENT
 
 DEFAULT_MAX_IMAGE_BYTES = 3 * 1024 * 1024  # 频道 file_image 上限约 3MB（错误码 304020）
 DEFAULT_TIMEOUT = 30.0
@@ -130,7 +130,7 @@ class QQChannelImageHost:
         if self._token and now < self._token_expire_at:
             return self._token
 
-        resp = httpx.post(
+        resp = HTTP_CLIENT.post(
             _TOKEN_URL,
             json={
                 "appId": str(self.config.appid),
@@ -179,7 +179,7 @@ class QQChannelImageHost:
         ext = mime_type.split("/")[-1] if "/" in mime_type else "jpg"
         token = self._access_token(timeout=timeout)
 
-        resp = httpx.post(
+        resp = HTTP_CLIENT.post(
             f"{_QQ_API_BASE}/channels/{self.config.channel_id}/messages",
             files={"file_image": (f"image.{ext}", body, mime_type)},
             data={"msg_id": "1"},
