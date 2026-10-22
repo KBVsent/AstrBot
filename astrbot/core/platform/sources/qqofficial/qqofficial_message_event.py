@@ -37,8 +37,10 @@ from astrbot.core.platform.sources.qqofficial.qqofficial_chunked_upload import (
     QQOFFICIAL_CHUNKED_UPLOAD_THRESHOLD,
     QQOfficialChunkedUploader,
 )
+from astrbot.core.utils.imagehost import LocalBackend
 from astrbot.core.utils.media_utils import MediaResolver, file_uri_to_path, is_file_uri
 
+from ._image_host import image_host_backends
 from ._markdown_media import image_to_markdown_fragment
 from .components import QQCButton, QQCKeyboard
 
@@ -578,6 +580,18 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             use_md = True
         convert_img = has_keyboard_component and use_md is not False
 
+        # 图床优先链里的 qqofficial 挂在当前会话的群或用户下
+        group_openid = user_openid = None
+        match source:
+            case botpy.message.GroupMessage():
+                group_openid = source.group_openid
+            case botpy.message.C2CMessage():
+                user_openid = source.author.user_openid
+            case botpy.interaction.Interaction() if source.chat_type == 1:
+                group_openid = source.group_openid
+            case botpy.interaction.Interaction() if source.chat_type == 2:
+                user_openid = source.user_openid
+
         (
             plain_text,
             image_base64,
@@ -592,6 +606,12 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             message_to_send,
             convert_image_to_markdown=convert_img,
             image_host_chain=self._image_host_chain,
+            local_image_hosts=image_host_backends(
+                self.bot,
+                self.platform_meta.id,
+                group_openid=group_openid,
+                user_openid=user_openid,
+            ),
         )
 
         # C2C 流式仅用于文本分片，富媒体时降级为普通发送，避免平台侧流式校验报错。
@@ -1247,6 +1267,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         message: MessageChain,
         convert_image_to_markdown: bool = False,
         image_host_chain: list[str] | None = None,
+        local_image_hosts: dict[str, LocalBackend] | None = None,
     ):
         """将 MessageChain 解析为发送 payload 所需要素。
 
@@ -1256,6 +1277,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 转成 markdown `![](url)` 语法追加到 plain_text，并跳过 base64 上传；
                 这样图片能和 keyboard/markdown 共存于同一条 msg_type=2 消息。
             image_host_chain: 图床后端 id 有序优先链，透传给 image_to_markdown_fragment。
+            local_image_hosts: 适配器自带的图床后端，同样透传。
 
         Returns:
             (plain_text, image_base64, image_file_path, record_file_path,
@@ -1285,7 +1307,9 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             elif isinstance(i, Image):
                 # markdown 模式下尽量把图片转成 markdown 语法，以便与 keyboard 共存
                 if convert_image_to_markdown:
-                    fragment = await image_to_markdown_fragment(i, image_host_chain)
+                    fragment = await image_to_markdown_fragment(
+                        i, image_host_chain, local_image_hosts
+                    )
                     if fragment is not None:
                         plain_text += fragment
                         continue

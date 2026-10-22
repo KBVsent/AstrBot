@@ -103,7 +103,7 @@ class _FakeBackendType:
 def test_backend_accepts_declared_mime_types(entry, mime_type, accepted):
     backend = uploader._Backend(
         id="b",
-        client=None,  # type: ignore[arg-type]
+        upload=None,  # type: ignore[arg-type]
         accepted_mime_types=uploader._parse_accepted_mime_types(entry),
     )
     assert backend.accepts(mime_type) is accepted
@@ -112,7 +112,7 @@ def test_backend_accepts_declared_mime_types(entry, mime_type, accepted):
 def test_malformed_mime_types_falls_back_to_images_only():
     backend = uploader._Backend(
         id="b",
-        client=None,  # type: ignore[arg-type]
+        upload=None,  # type: ignore[arg-type]
         accepted_mime_types=uploader._parse_accepted_mime_types({"mime_types": 123}),
     )
     assert backend.accepts("image/png") is True

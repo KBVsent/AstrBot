@@ -32,6 +32,7 @@ from astrbot.core.platform.astr_message_event import AstrMessageEvent, MessageSe
 from astrbot.core.utils.media_utils import MediaResolver
 
 from ...register import register_platform_adapter
+from ._image_host import image_host_backends
 from .qqofficial_message_event import QQOfficialMessageEvent, resolve_group
 
 # remove logger handler
@@ -445,6 +446,13 @@ class QQOfficialPlatformAdapter(Platform):
             use_md = True
         convert_img = has_keyboard and use_md is not False
 
+        # 图床优先链里的 qqofficial 挂在会话的群或用户下；群会话的场景未知时按频道发送，同样没有目标
+        is_qq_group = (
+            session.message_type == MessageType.GROUP_MESSAGE
+            and self._session_scene.get(session.session_id) == "group"
+        )
+        is_c2c = session.message_type == MessageType.FRIEND_MESSAGE
+
         (
             plain_text,
             image_base64,
@@ -459,6 +467,12 @@ class QQOfficialPlatformAdapter(Platform):
             message_chain,
             convert_image_to_markdown=convert_img,
             image_host_chain=self.config.get("image_host_chain") or None,
+            local_image_hosts=image_host_backends(
+                self.client,
+                session.platform_id,
+                group_openid=session.session_id if is_qq_group else None,
+                user_openid=session.session_id if is_c2c else None,
+            ),
         )
         if (
             not plain_text

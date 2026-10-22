@@ -9,26 +9,36 @@ QQ markdown 支持 `![alt #WIDTHpx #HEIGHTpx](public_url)` 语法内嵌图片，
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from astrbot.api import logger
 from astrbot.api.message_components import Image
-from astrbot.core.utils.imagehost import upload_image
+from astrbot.core.utils.imagehost import LocalBackend, upload_image
 
 
 async def image_to_markdown_fragment(
-    image: Image, chain: list[str] | None = None
+    image: Image,
+    chain: list[str] | None = None,
+    local_image_hosts: Mapping[str, LocalBackend] | None = None,
 ) -> str | None:
     """将 Image 组件转成 markdown 图片片段。
 
     Args:
         image: 待转换的图片组件。
-        chain: 图床后端 id 的有序优先级（对应全局 image_host 的 id）；空则用全部已启用后端。
+        chain: 图床后端 id 的有序优先级（对应全局 image_host 的 id）。
+        local_image_hosts: 适配器自带的图床后端，见 _image_host.image_host_backends。
+            chain 为空时只用它；它也为空（频道、频道私信）时才按全局 image_host 的顺序走。
 
     Returns:
         形如 "\n![img #WIDTHpx #HEIGHTpx](url)\n" 的字符串；
         若文件服务不可用或尺寸读取失败，返回 None（调用方应回退到 msg_type=7）。
     """
     path = await image.convert_to_file_path()
-    url = await upload_image(path, chain)
+    # 机器人自身的富媒体上传只依赖机器人凭证，确定可用；全局后端（默认的 chatglm）
+    # 免凭证不代表能用，所以没配优先链时不拿它们做默认
+    if not chain and local_image_hosts:
+        chain = list(local_image_hosts)
+    url = await upload_image(path, chain, local_image_hosts)
     if url is None:
         try:
             url = await image.register_to_file_service()

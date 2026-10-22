@@ -7,6 +7,9 @@ chain（后端 id 有序优先级）。上传失败按指数退避冷却并自�
 每个后端可用 mime_types 声明自己接受的 MIME 类型（支持 image/* 等通配），
 上传时只在声明接受该类型的后端里挑候选 —— 否则拿视频去试只吃图片的第三方图床，
 失败累积的冷却会把图片上传路径一起冻上。字段缺失时默认只接受图片，旧配置行为不变。
+
+调用方还可以自带后端（LocalBackend），用于离开调用现场就没法上传的场景，排序与冷却
+和全局后端一致。
 """
 
 from __future__ import annotations
@@ -14,7 +17,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from astrbot.api import logger
@@ -75,12 +79,48 @@ _DEFAULT_ACCEPTED_MIME_TYPES = ("image/*",)
 
 
 @dataclass
+class _Cooldown:
+    until: float = 0.0  # time.monotonic() 时间戳；<= now 表示可用
+    failure_score: int = 0  # 失败累计分：失败 +1、成功 -1，决定冷却时长
+
+    def record_success(self) -> None:
+        """成功：失败分递减、解除冷却，逐步恢复优先级。"""
+        self.failure_score = max(0, self.failure_score - 1)
+        self.until = 0.0
+
+    def record_failure(self) -> float:
+        """失败：累加失败分，按指数退避进入冷却，返回本次冷却秒数。"""
+        self.failure_score = min(self.failure_score + 1, _MAX_FAILURE_SCORE)
+        cooldown = _cooldown_for(self.failure_score)
+        self.until = time.monotonic() + cooldown
+        return cooldown
+
+
+@dataclass(frozen=True)
+class LocalBackend:
+    """调用方自带的图床后端，只在本次上传的 chain 里按 id 生效。
+
+    给离开调用现场就没法上传的后端用，例如 QQ 官方的富媒体上传要挂在当前会话的 openid 下，
+    无法从全局 image_host 配置构建。chain 为空时不会用到它，必须在 chain 里显式写出 id。
+
+    Attributes:
+        upload: 上传本地文件并返回外链的协程函数。
+        state_key: 冷却状态按它跨调用保留；同一 id 在不同机器人下应取不同的 key，
+            免得一个机器人配额耗尽把其他机器人也冻上。
+        accepted_mime_types: 接受的 MIME 类型，语义同配置项 mime_types。
+    """
+
+    upload: Callable[[str], Awaitable[str]]
+    state_key: str
+    accepted_mime_types: tuple[str, ...] = _DEFAULT_ACCEPTED_MIME_TYPES
+
+
+@dataclass
 class _Backend:
     id: str
-    client: _ImageUploader
+    upload: Callable[[str], Awaitable[str]]
     accepted_mime_types: tuple[str, ...] = _DEFAULT_ACCEPTED_MIME_TYPES
-    cooldown_until: float = 0.0  # time.monotonic() 时间戳；<= now 表示可用
-    failure_score: int = 0  # 失败累计分：失败 +1、成功 -1，决定冷却时长
+    cooldown: _Cooldown = field(default_factory=_Cooldown)
 
     def accepts(self, mime_type: str) -> bool:
         """判断该后端是否声明接受给定 MIME 类型（支持 type/* 与 */* 通配）。"""
@@ -127,6 +167,9 @@ def _parse_accepted_mime_types(entry: dict) -> tuple[str, ...]:
 # 懒加载缓存：id -> 已初始化的 _Backend；冷却状态跨适配器共享（某后端不稳则各处都退避）。
 _backends_by_id: dict[str, _Backend] | None = None
 _config_order: list[str] = []  # 配置里 enable 后端的 id 顺序，chain 为空时按此顺序
+# 调用方自带后端的冷却状态，键是 LocalBackend.state_key。后端对象每次调用都是新的
+# （上传函数绑定着当次的会话），冷却必须存在这里才能跨调用生效。
+_local_cooldowns: dict[str, _Cooldown] = {}
 
 
 def _get_backends() -> dict[str, _Backend]:
@@ -138,6 +181,14 @@ def _get_backends() -> dict[str, _Backend]:
     global _backends_by_id, _config_order
     if _backends_by_id is not None:
         return _backends_by_id
+
+    def run_in_thread(client: _ImageUploader) -> Callable[[str], Awaitable[str]]:
+        # 各图床客户端都是阻塞 IO，放进线程里跑
+        async def upload(path: str) -> str:
+            result = await asyncio.to_thread(client.upload_file, path, public_url=False)
+            return result.url
+
+        return upload
 
     from astrbot.core import astrbot_config
 
@@ -171,7 +222,7 @@ def _get_backends() -> dict[str, _Backend]:
             continue
         backends[backend_id] = _Backend(
             id=backend_id,
-            client=client,
+            upload=run_in_thread(client),
             accepted_mime_types=_parse_accepted_mime_types(entry),
         )
         order.append(backend_id)
@@ -184,24 +235,27 @@ def _get_backends() -> dict[str, _Backend]:
 
 
 def reset_backends() -> None:
-    """清空后端缓存，下次上传时按最新配置重建（配置变更后调用）。"""
+    """清空后端缓存与冷却状态，下次上传时按最新配置重建（配置变更后调用）。"""
     global _backends_by_id, _config_order
     _backends_by_id = None
     _config_order = []
+    _local_cooldowns.clear()
 
 
 def _resolve_candidates(
-    chain: list[str] | None, mime_type: str | None = None
+    chain: list[str] | None,
+    mime_type: str | None = None,
+    local_backends: Mapping[str, LocalBackend] | None = None,
 ) -> list[_Backend]:
     """把 chain（后端 id 有序列表）解析成 _Backend 列表；空则按配置顺序取全部。
 
     Args:
-        chain: 后端 id 的有序优先级；空则按配置顺序取全部。
+        chain: 后端 id 的有序优先级；空则按配置顺序取全部全局后端。
         mime_type: 待上传文件的 MIME 类型；给出时只保留声明接受该类型的后端。
+        local_backends: 调用方自带后端，id 与全局后端重名时以它为准。
     """
     backends = _get_backends()
-    if not backends:
-        return []
+    local_backends = local_backends or {}
     ids = chain if chain else _config_order
     result: list[_Backend] = []
     seen: set[str] = set()
@@ -209,7 +263,16 @@ def _resolve_candidates(
         backend_id = str(backend_id).strip()
         if backend_id in seen:
             continue
-        backend = backends.get(backend_id)
+        local = local_backends.get(backend_id)
+        if local is not None:
+            backend = _Backend(
+                id=backend_id,
+                upload=local.upload,
+                accepted_mime_types=local.accepted_mime_types,
+                cooldown=_local_cooldowns.setdefault(local.state_key, _Cooldown()),
+            )
+        else:
+            backend = backends.get(backend_id)
         if backend is None:
             logger.debug(f"[ImageHost] chain 引用了不存在的图床 id：{backend_id}")
             continue
@@ -224,21 +287,25 @@ def _resolve_candidates(
 
 
 async def upload_image(
-    file_path: str | Path, chain: list[str] | None = None
+    file_path: str | Path,
+    chain: list[str] | None = None,
+    local_backends: Mapping[str, LocalBackend] | None = None,
 ) -> str | None:
     """把本地图片上传到图床，返回公网外链；全部失败返回 None。
 
     Args:
         file_path: 本地图片路径。
         chain: 后端 id 的有序优先级（对应 image_host 配置里的 id）；空则用全部已启用后端。
+        local_backends: 调用方自带后端（id -> LocalBackend），只在 chain 写出其 id 时使用。
     """
-    return await upload_media(file_path, chain)
+    return await upload_media(file_path, chain, local_backends=local_backends)
 
 
 async def upload_media(
     file_path: str | Path,
     chain: list[str] | None = None,
     mime_type: str | None = None,
+    local_backends: Mapping[str, LocalBackend] | None = None,
 ) -> str | None:
     """把本地媒体文件上传到图床，返回公网外链；无可用后端或全部失败返回 None。
 
@@ -249,43 +316,38 @@ async def upload_media(
         file_path: 本地媒体路径。
         chain: 后端 id 的有序优先级（对应 image_host 配置里的 id）；空则用全部已启用后端。
         mime_type: 文件 MIME 类型；不给则按内容优先探测。
+        local_backends: 调用方自带后端（id -> LocalBackend），只在 chain 写出其 id 时使用。
     """
     path = str(file_path)
-    if not _get_backends():
+    if not _get_backends() and not local_backends:
         return None
 
     resolved_mime = normalize_mime_type(mime_type) if mime_type else ""
     if not resolved_mime:
         resolved_mime = await detect_file_mime_type_async(path)
 
-    candidates = _resolve_candidates(chain, resolved_mime)
+    candidates = _resolve_candidates(chain, resolved_mime, local_backends)
     if not candidates:
         logger.debug(f"[ImageHost] 无声明接受 {resolved_mime} 的图床后端")
         return None
 
     now = time.monotonic()
     # 优先用未在冷却中的后端；若全部冷却中则仍然全试一遍，不直接放弃。
-    usable = [b for b in candidates if b.cooldown_until <= now] or candidates
+    usable = [b for b in candidates if b.cooldown.until <= now] or candidates
 
     for backend in usable:
         try:
-            result = await asyncio.to_thread(
-                backend.client.upload_file, path, public_url=False
-            )
-            # 成功：失败分递减、解除冷却，逐步恢复优先级。
-            backend.failure_score = max(0, backend.failure_score - 1)
-            backend.cooldown_until = 0.0
-            return result.url
+            url = await backend.upload(path)
         except Exception as e:
-            # 失败：累加失败分，冷却时长按指数退避增长；持续不稳定者被冻得越来越久。
-            backend.failure_score = min(backend.failure_score + 1, _MAX_FAILURE_SCORE)
-            cooldown = _cooldown_for(backend.failure_score)
-            backend.cooldown_until = time.monotonic() + cooldown
+            cooldown = backend.cooldown.record_failure()
             logger.warning(
                 f"[ImageHost] 图床 {backend.id} 上传失败（累计 "
-                f"{backend.failure_score} 次），冷却 {cooldown:.0f}s 后再试，"
+                f"{backend.cooldown.failure_score} 次），冷却 {cooldown:.0f}s 后再试，"
                 f"期间自动切换其它后端：{e}"
             )
+            continue
+        backend.cooldown.record_success()
+        return url
 
     logger.warning("[ImageHost] 所有图床后端均失败")
     return None

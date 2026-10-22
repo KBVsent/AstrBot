@@ -574,7 +574,7 @@ CONFIG_METADATA_2 = {
                         "description": "图床优先链",
                         "type": "list",
                         "items": {"type": "string"},
-                        "hint": "图床后端 id 的优先顺序（对应全局设置里的 image_host id）；留空用全部已启用后端",
+                        "hint": "图床后端 id 的优先顺序（对应全局设置里的 image_host id）；留空用全部已启用后端。QQ 官方机器人可额外填 qqofficial，留空时默认用它",
                     },
                     # "webchat_link_path": {
                     #     "description": "链接路径",

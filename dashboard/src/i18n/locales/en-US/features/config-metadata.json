@@ -850,7 +850,7 @@
       },
       "image_host_chain": {
         "description": "Image host chain",
-        "hint": "Ordered list of image hosting instance IDs (matching the ids configured in Settings → Image Hosting). Leave empty to use all enabled backends in the configured order."
+        "hint": "Ordered list of image hosting instance IDs (matching the ids configured in Settings → Image Hosting). Leave empty to use all enabled backends in the configured order. QQ Official bots can also list qqofficial, which is the default when left empty."
       }
     },
     "general": {
