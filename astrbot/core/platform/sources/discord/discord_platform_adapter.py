@@ -4,6 +4,7 @@ import inspect
 import json
 import re
 import sys
+import time
 from typing import Any, cast
 
 import discord
@@ -1281,23 +1282,36 @@ class DiscordPlatformAdapter(Platform):
         async def dynamic_callback(
             ctx: discord.ApplicationContext, **kwargs: Any
         ) -> None:
-            # 1. 尝试立即响应，防止超时（移到最前面）
+            # 1. 立即 ack：Discord 的 3 秒期限从交互创建时算起。
+            # age 是 Discord 时钟（雪花 ID）减本机时钟，本机时钟偏差会混进去。
+            age = (discord.utils.utcnow() - ctx.interaction.created_at).total_seconds()
+            started = time.monotonic()
             followup_webhook = None
             try:
-                # 设定 2.5 秒超时，避免卡死整个 event loop。
+                # 晚到的 ack 会被 Discord 当场回 10062，超时只防请求挂死；
+                # 提前取消会丢掉已被接受、只是响应回得慢的 ack。
                 # ephemeral 在此刻锁定：True → 本次 defer + 全部 followup 仅触发者可见。
-                await asyncio.wait_for(ctx.defer(ephemeral=ephemeral), timeout=2.5)
+                await asyncio.wait_for(ctx.defer(ephemeral=ephemeral), timeout=10)
                 followup_webhook = ctx.followup
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"[Discord] Defer command '{command_name}' timeout. Network might be too slow."
+                    f"[Discord] Defer command '{command_name}' timed out "
+                    f"(interaction age {age:.2f}s at callback, defer >10s)."
                 )
                 return
             except Exception as e:
                 logger.warning(
-                    f"[Discord] Failed to defer command '{command_name}': {e}"
+                    f"[Discord] Failed to defer command '{command_name}' "
+                    f"(interaction age {age:.2f}s at callback, "
+                    f"defer {time.monotonic() - started:.2f}s): {e}"
                 )
                 return
+            elapsed = time.monotonic() - started
+            if age + elapsed > 1.5:
+                logger.warning(
+                    f"[Discord] Slow defer for command '{command_name}' "
+                    f"(interaction age {age:.2f}s at callback, defer {elapsed:.2f}s)."
+                )
 
             # 按声明顺序处理各参数值，通用映射进 AstrBot 消息模型（不绑定具体插件用法）：
             #   - User/Member  → Comp.At（@ 提及，与 on_message 路径语义一致）

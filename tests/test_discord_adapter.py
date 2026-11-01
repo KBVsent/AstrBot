@@ -1,7 +1,12 @@
+import asyncio
 import base64
+from datetime import timedelta
 from io import BytesIO
 from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
+import discord
 import pytest
 
 from astrbot.api.message_components import Image, Record
@@ -43,7 +48,7 @@ async def test_discord_audio_attachment_resolves_to_wav_record(monkeypatch):
 
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
 
     message = SimpleNamespace(
         id=42,
@@ -130,3 +135,61 @@ async def test_discord_send_record_resolves_audio_with_media_resolver(monkeypatc
     assert view is None
     assert embeds == []
     assert reference_message_id is None
+
+
+def _slash_adapter() -> tuple[DiscordPlatformAdapter, AsyncMock]:
+    adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
+    adapter.bot_self_id = "1"
+    handle_msg = AsyncMock()
+    setattr(adapter, "handle_msg", handle_msg)
+    return adapter, handle_msg
+
+
+def _slash_ctx(defer, created_at) -> Any:
+    return SimpleNamespace(
+        defer=defer,
+        followup=object(),
+        interaction=SimpleNamespace(id=99, created_at=created_at),
+        channel=None,
+        guild_id=None,
+        channel_id=123,
+        author=SimpleNamespace(id=2, display_name="tester"),
+        locale=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_slow_but_successful_defer_still_dispatches_command():
+    """Discord 可能已接受 ack 只是响应慢，回调不能在 3 秒内就放弃 defer。"""
+
+    async def slow_defer(ephemeral: bool = False) -> None:
+        await asyncio.sleep(2.6)
+
+    adapter, handle_msg = _slash_adapter()
+    ctx = _slash_ctx(slow_defer, discord.utils.utcnow())
+
+    await adapter._create_dynamic_callback("ping", 0)(ctx)
+
+    handle_msg.assert_awaited_once()
+    assert handle_msg.await_args_list[0].args[1] is ctx.followup
+
+
+@pytest.mark.asyncio
+async def test_late_interaction_logs_age_at_callback(monkeypatch):
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        discord_platform_adapter.logger,
+        "warning",
+        lambda msg, *args, **kwargs: warnings.append(msg),
+    )
+
+    async def instant_defer(ephemeral: bool = False) -> None:
+        return None
+
+    adapter, handle_msg = _slash_adapter()
+    ctx = _slash_ctx(instant_defer, discord.utils.utcnow() - timedelta(seconds=2))
+
+    await adapter._create_dynamic_callback("ping", 0)(ctx)
+
+    handle_msg.assert_awaited_once()
+    assert any("Slow defer" in w and "age 2." in w for w in warnings), warnings
