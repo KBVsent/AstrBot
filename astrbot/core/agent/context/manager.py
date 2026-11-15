@@ -3,6 +3,7 @@ from astrbot import logger
 from ..message import Message
 from .compressor import LLMSummaryCompressor, TruncateByTurnsCompressor
 from .config import ContextConfig
+from .round_utils import split_into_rounds
 from .token_counter import EstimateTokenCounter
 from .truncator import ContextTruncator
 
@@ -24,6 +25,7 @@ class ContextManager:
             config: The context configuration.
         """
         self.config = config
+        self.revision = 0
 
         self.token_counter = config.custom_token_counter or EstimateTokenCounter()
         self.truncator = ContextTruncator()
@@ -36,6 +38,7 @@ class ContextManager:
                 keep_recent_ratio=config.llm_compress_keep_recent_ratio,
                 instruction_text=config.llm_compress_instruction,
                 token_counter=self.token_counter,
+                request_event_emitter=config.request_event_emitter,
             )
         else:
             self.compressor = TruncateByTurnsCompressor(
@@ -64,6 +67,9 @@ class ContextManager:
                     drop_turns=self.config.truncate_turns,
                 )
 
+            if result is not messages:
+                self.revision += 1
+
             # 2. 基于 token 的压缩
             if self.config.max_context_tokens > 0:
                 total_tokens = self.token_counter.count_tokens(
@@ -73,6 +79,8 @@ class ContextManager:
                 if self.compressor.should_compress(
                     result, total_tokens, self.config.max_context_tokens
                 ):
+                    # Custom compressors may mutate the existing list in place.
+                    self.revision += 1
                     result = await self._run_compression(result, total_tokens)
 
             return result
@@ -85,6 +93,11 @@ class ContextManager:
     ) -> list[Message]:
         """
         Compress/truncate the messages.
+
+        If the context still exceeds the limit after compression (for example
+        because the summary request failed), whole rounds are dropped, oldest
+        first, until it fits. The latest round is always kept, even when it
+        alone exceeds the limit.
 
         Args:
             messages: The original message list.
@@ -109,13 +122,42 @@ class ContextManager:
         )
 
         # last check
-        if self.compressor.should_compress(
+        if not self.compressor.should_compress(
             messages, tokens_after_summary, self.config.max_context_tokens
         ):
-            logger.info(
-                "Context still exceeds max tokens after compression, applying halving truncation..."
-            )
-            # still need compress, truncate by half
-            messages = self.truncator.truncate_by_halving(messages)
+            return messages
 
+        logger.info(
+            "Context still exceeds max tokens after compression, dropping the oldest rounds..."
+        )
+        # Drop whole rounds, oldest first, so that tool calls stay with their
+        # results, and recount after each one. The latest round is the current
+        # request and is always kept.
+        first_non_system = next(
+            (i for i, msg in enumerate(messages) if msg.role != "system"),
+            len(messages),
+        )
+        system_messages = messages[:first_non_system]
+        rounds = [
+            [seg for seg in rnd if isinstance(seg, Message)]
+            for rnd in split_into_rounds(messages[first_non_system:])
+        ]
+        tokens = tokens_after_summary
+        dropped_rounds = 0
+        while len(rounds) > 1 and self.compressor.should_compress(
+            messages, tokens, self.config.max_context_tokens
+        ):
+            rounds.pop(0)
+            dropped_rounds += 1
+            messages = system_messages + [msg for rnd in rounds for msg in rnd]
+            tokens = self.token_counter.count_tokens(messages)
+        logger.info(f"Dropped {dropped_rounds} oldest round(s).")
+
+        if self.compressor.should_compress(
+            messages, tokens, self.config.max_context_tokens
+        ):
+            logger.warning(
+                "Context still exceeds max tokens with only the latest round left; "
+                "sending it as is."
+            )
         return messages

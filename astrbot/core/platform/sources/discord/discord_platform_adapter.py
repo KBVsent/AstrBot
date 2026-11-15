@@ -7,13 +7,22 @@ import sys
 import time
 from typing import Any, cast
 
+import aiohttp
 import discord
 from discord.abc import GuildChannel, Messageable, PrivateChannel
 from discord.channel import DMChannel
 
 from astrbot import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import At, File, Image, Plain, Record
+from astrbot.api.message_components import (
+    At,
+    ButtonInteraction,
+    File,
+    Image,
+    Plain,
+    Record,
+    Reply,
+)
 from astrbot.api.platform import (
     AstrBotMessage,
     Group,
@@ -24,6 +33,10 @@ from astrbot.api.platform import (
     register_platform_adapter,
 )
 from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.core.platform.button_interaction import (
+    BUTTON_CALLBACK_PREFIX,
+    decode_button_callback,
+)
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star import star_map
@@ -165,7 +178,9 @@ class DiscordPlatformAdapter(Platform):
             if self.bot_self_id is None:
                 self.bot_self_id = message_data.get("bot_id")
             abm = await self.convert_message(data=message_data)
-            await self.handle_msg(abm)
+            interaction = message_data.get("interaction")
+            followup_webhook = interaction.followup if interaction is not None else None
+            await self.handle_msg(abm, followup_webhook)
 
         async def on_interaction_received(interaction_data) -> None:
             # 组件交互（按钮 / select / modal 提交）入站：转 ABM 后进 pipeline。
@@ -273,11 +288,16 @@ class DiscordPlatformAdapter(Platform):
             return
         # 必须经由 channel.guild 取 owner_id。Thread 与 GroupChannel 自身也有owner_id
         # 但那是帖子创建者 / 群组私聊发起人，不是服务器所有者。
-        owner_id = getattr(getattr(channel, "guild", None), "owner_id", None)
+        guild = getattr(channel, "guild", None)
+        owner_id = getattr(guild, "owner_id", None)
+        member_count = getattr(guild, "member_count", None)
+        icon_url = getattr(getattr(guild, "icon", None), "url", None)
         abm.group = Group(
             group_id=channel_id,
             group_name=name,
             group_owner=str(owner_id) if owner_id else None,
+            group_avatar=str(icon_url) if icon_url else None,
+            member_count=member_count if isinstance(member_count, int) else None,
         )
 
     def _convert_message_to_abm(self, data: dict) -> AstrBotMessage:
@@ -384,6 +404,30 @@ class DiscordPlatformAdapter(Platform):
         # 交互不靠文本路由（处理器读 custom_id），message_str/message 均留空——避免触发命令匹配
         abm.message_str = ""
         abm.message = []
+        custom_id = str((interaction.data or {}).get("custom_id", ""))
+        if custom_id.startswith(BUTTON_CALLBACK_PREFIX):
+            # 通用按钮的点击：过期提示由 WakingCheckStage 发，这里只负责还原
+            try:
+                action_id, callback_data = decode_button_callback(
+                    custom_id, allow_expired=True
+                )
+            except ValueError as exc:
+                logger.warning("[Discord] 无法还原按钮回调: %s", exc)
+            else:
+                source_message = getattr(interaction, "message", None)
+                abm.message = [
+                    ButtonInteraction(
+                        action_id=action_id,
+                        data=callback_data,
+                        interaction_id=str(interaction.id),
+                        source_message_id=(
+                            str(source_message.id)
+                            if source_message is not None
+                            else None
+                        ),
+                        callback_data=custom_id,
+                    )
+                ]
         abm.sender = MessageMember(
             user_id=str(interaction.user.id) if interaction.user else "",
             nickname=interaction.user.display_name if interaction.user else "",
@@ -394,12 +438,50 @@ class DiscordPlatformAdapter(Platform):
         abm.message_id = str(interaction.id)
         return abm
 
+    async def _attach_quoted_message(
+        self, abm: AstrBotMessage, message: discord.Message
+    ) -> None:
+        """回复消息时把被引用的消息作为 Reply 放到消息链最前。"""
+        reference = getattr(message, "reference", None)
+        if not reference or message.type != discord.MessageType.reply:
+            return
+        quoted = reference.resolved
+        if quoted is None:
+            quoted = reference.cached_message
+        if quoted is None and reference.message_id is not None:
+            try:
+                quoted = await message.channel.fetch_message(reference.message_id)
+            except (
+                discord.HTTPException,
+                aiohttp.ClientError,
+                asyncio.TimeoutError,
+                OSError,
+            ) as e:
+                logger.warning(
+                    "[Discord] Could not fetch replied-to message %s: %s",
+                    reference.message_id,
+                    e,
+                )
+        # Deleted references are sentinels without message content.
+        if isinstance(quoted, discord.Message):
+            abm.message.insert(
+                0,
+                Reply(
+                    id=str(quoted.id),
+                    chain=[Plain(text=quoted.content)] if quoted.content else [],
+                    message_str=quoted.content,
+                    sender_id=str(quoted.author.id),
+                    sender_nickname=quoted.author.display_name,
+                ),
+            )
+
     async def convert_message(self, data: dict) -> AstrBotMessage:
         """将平台消息转换成 AstrBotMessage（普通消息 / 组件交互两类）"""
         if data.get("type") == "interaction":
             abm = self._convert_interaction_to_abm(data)
         else:
             abm = self._convert_message_to_abm(data)
+            await self._attach_quoted_message(abm, data["message"])
         # 统一把 Record 媒体解析成本地 wav（media 统一，#7c366a708）
         for component in abm.message:
             if isinstance(component, Record):
@@ -469,11 +551,14 @@ class DiscordPlatformAdapter(Platform):
             )
             return
 
-        # 检查是否为斜杠指令
-        is_slash_command = message_event.interaction_followup_webhook is not None
+        if message_event.is_button_interaction():
+            message_event.is_wake = True
+            message_event.is_at_or_wake_command = True
+            self.commit_event(message_event)
+            return
 
-        # 1. 优先处理斜杠指令
-        if is_slash_command:
+        # Slash commands carry a follow-up webhook after their initial defer.
+        if message_event.is_slash_command():
             message_event.is_wake = True
             message_event.is_at_or_wake_command = True
             self.commit_event(message_event)
@@ -1371,7 +1456,8 @@ class DiscordPlatformAdapter(Platform):
                     if ctx.guild_id is not None
                     else MessageType.FRIEND_MESSAGE
                 )
-                abm.group_id = str(ctx.channel_id)
+                if abm.type == MessageType.GROUP_MESSAGE:
+                    abm.group_id = str(ctx.channel_id)
 
             abm.message_str = message_str_for_filter
             abm.sender = MessageMember(

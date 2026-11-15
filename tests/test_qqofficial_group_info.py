@@ -313,7 +313,8 @@ async def test_guild_message_never_queries_the_group_api():
     request = AsyncMock(return_value=GROUP_INFO)
     event = _guild_event(request)
 
-    assert await event.get_group() is None
+    channel = await event.get_group()
+    assert channel is not None and channel.group_id == event.message_obj.group_id
     assert await event.get_group_info() is None
     assert await event.get_group_bot_state() is None
     request.assert_not_awaited()
@@ -401,3 +402,16 @@ async def test_bot_state_expires_sooner_than_group_info(monkeypatch):
     assert request.await_count == 2
     await event.get_group_bot_state()
     assert request.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_stuck_group_api_falls_back_to_the_inbound_name(monkeypatch):
+    """入站回填是同步等待的，接口不返回时要在超时后放行，群名用载荷自带的。"""
+    monkeypatch.setattr(qqofficial_message_event, "_GROUP_QUERY_TIMEOUT_SECONDS", 0.01)
+
+    async def never_responds(_route):
+        await asyncio.Event().wait()
+
+    bot = _make_bot_client(AsyncMock(side_effect=never_responds))
+    group = await asyncio.wait_for(resolve_group(bot, "group-1", "入站群名"), 1)
+    assert group is not None and group.group_name == "入站群名"

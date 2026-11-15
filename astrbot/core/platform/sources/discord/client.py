@@ -141,6 +141,9 @@ class DiscordBotClient(discord.Bot):
         slash command 不经此处（走 Pycord interaction 通道），故两种模式下都可用。
         mention_and_dm 模式仅处理 @bot 或私信（无特权 intent 时 Discord 也会下发这两类消息的正文）。
         """
+        if self.user is not None and message.author.id == self.user.id:
+            return
+
         if message.author.bot and not self.allow_bot_messages:
             return
 

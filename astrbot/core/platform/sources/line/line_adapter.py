@@ -24,6 +24,7 @@ from astrbot.api.message_components import (
     At,
     AtAll,
     BaseMessageComponent,
+    ButtonInteraction,
     File,
     Image,
     Plain,
@@ -40,6 +41,10 @@ from astrbot.api.platform import (
     PlatformMetadata,
 )
 from astrbot.core.platform.astr_message_event import MessageSesion
+from astrbot.core.platform.button_interaction import (
+    BUTTON_CALLBACK_PREFIX,
+    decode_button_callback,
+)
 from astrbot.core.utils.media_utils import MediaResolver, detect_file_mime_type_async
 from astrbot.core.utils.webhook_utils import log_webhook_info
 
@@ -91,6 +96,16 @@ LINE_I18N_RESOURCES = {
         "channel_secret": {
             "description": "LINE Channel Secret",
             "hint": "Used to verify LINE webhook signatures.",
+        },
+    },
+    "ja-JP": {
+        "channel_access_token": {
+            "description": "LINE チャネルアクセストークン",
+            "hint": "LINE Messaging API のチャネルアクセストークンです。",
+        },
+        "channel_secret": {
+            "description": "LINE チャネルシークレット",
+            "hint": "LINE Webhook の署名検証に使用します。",
         },
     },
 }
@@ -452,6 +467,24 @@ class LinePlatformAdapter(Platform):
         abm.message_id = str(event.get("webhookEventId") or uuid.uuid4().hex)
         abm.message = []
         abm.message_str = ""
+        postback = event.get("postback")
+        payload = postback.get("data") if isinstance(postback, dict) else None
+        if isinstance(payload, str) and payload.startswith(BUTTON_CALLBACK_PREFIX):
+            # 通用按钮的点击：过期提示由 WakingCheckStage 发，这里只负责还原
+            try:
+                action_id, data = decode_button_callback(payload, allow_expired=True)
+            except ValueError as exc:
+                logger.warning("[LINE] 无法还原按钮回调: %s", exc)
+            else:
+                abm.message = [
+                    ButtonInteraction(
+                        action_id=action_id,
+                        data=data,
+                        interaction_id=abm.message_id,
+                        source_message_id=None,
+                        callback_data=payload,
+                    )
+                ]
         return abm
 
     async def _fill_message_event(

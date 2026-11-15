@@ -8,13 +8,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from deprecated import deprecated
-from sqlalchemy import CursorResult, Row, case, not_
+from sqlalchemy import CursorResult, Row, bindparam, case, event, literal, not_
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer
 from sqlmodel import col, delete, desc, func, or_, select, text, update
 
 from astrbot.core.db import BaseDatabase
+from astrbot.core.db.migration.migra_conversation_events import migrate_conversations
 from astrbot.core.db.po import (
     ApiKey,
     Attachment,
@@ -22,7 +23,8 @@ from astrbot.core.db.po import (
     CommandConfig,
     CommandConflict,
     CommandStat,
-    ConversationV2,
+    ConversationEvent,
+    ConversationV3,
     CronJob,
     Persona,
     PersonaFolder,
@@ -35,6 +37,7 @@ from astrbot.core.db.po import (
     SessionProjectRelation,
     SQLModel,
     UmoAlias,
+    UmoSender,
     WebChatThread,
 )
 from astrbot.core.db.po import (
@@ -49,17 +52,118 @@ TxResult = T.TypeVar("TxResult")
 CRON_FIELD_NOT_SET = object()
 
 
+def _webchat_session_title_match(keyword: str):
+    """Build a correlated EXISTS condition matching WebChat session titles.
+
+    WebChat generates its title on the platform session instead of the
+    conversation row, so the conversation is matched through the unified
+    message origin suffix ``!<session_id>``.
+
+    Args:
+        keyword: Search text matched against the session display name.
+
+    Returns:
+        A SQLAlchemy EXISTS expression usable inside a conversation query.
+    """
+    return (
+        select(1)
+        .where(col(PlatformSession.display_name).ilike(f"%{keyword}%"))
+        .where(
+            col(ConversationV3.umo).like(
+                literal("%!").concat(col(PlatformSession.session_id)),
+            )
+        )
+        .exists()
+    )
+
+
+def _conversation_content_match(keyword: str):
+    """Search only effective branch payloads, including inherited rebase content.
+
+    Args:
+        keyword: User-supplied literal search substring.
+
+    Returns:
+        A correlated, parameterized SQLite expression.
+    """
+    return text("""EXISTS (
+        WITH branch AS (
+            SELECT e.type, e.payload FROM conversation_events e
+            JOIN conversation_events tip ON tip.conversation_ref = conversations_v3.id
+              AND tip.seq = (SELECT seq FROM conversation_events
+                  WHERE conversation_ref = conversations_v3.id
+                    AND type IN ('message.appended', 'context.rebased')
+                  ORDER BY seq DESC LIMIT 1)
+            WHERE e.conversation_ref = conversations_v3.id
+              AND e.seq <= tip.seq
+              AND e.seq >= coalesce((SELECT seq FROM conversation_events
+                  WHERE conversation_ref = conversations_v3.id AND type = 'context.rebased'
+                    AND seq <= tip.seq ORDER BY seq DESC LIMIT 1), 0)
+        ), raw_messages AS (
+            SELECT CASE branch.type WHEN 'message.appended' THEN item.value
+                   ELSE json_extract(item.value, '$.message') END AS body
+            FROM branch, json_each(CASE branch.type WHEN 'message.appended'
+                THEN json_array(json_extract(payload, '$.message'))
+                ELSE json_extract(payload, '$.messages') END) AS item
+            WHERE branch.type='context.rebased' OR
+                (branch.type='message.appended' AND
+                 coalesce(json_extract(payload, '$.include_in_context'), 1))
+        ), searchable AS (
+            SELECT json_remove(body, '$._no_save', '$.content') AS metadata,
+                CASE json_type(body, '$.content') WHEN 'array' THEN (
+                    SELECT json_group_array(CASE part.type WHEN 'object'
+                        THEN json(json_remove(part.value, '$._no_save'))
+                        ELSE part.value END)
+                    FROM json_each(body, '$.content') AS part
+                    WHERE CASE part.type WHEN 'object'
+                        THEN NOT coalesce(json_extract(part.value, '$._no_save'), 0)
+                        ELSE 1 END
+                ) ELSE json_extract(body, '$.content') END AS content
+            FROM raw_messages WHERE NOT coalesce(json_extract(body, '$._no_save'), 0)
+        )
+        SELECT 1 FROM searchable WHERE metadata LIKE :pattern OR content LIKE :pattern
+            OR metadata LIKE :escaped OR content LIKE :escaped
+    )""").bindparams(
+        bindparam("pattern", f"%{keyword}%", unique=True),
+        bindparam(
+            "escaped", f"%{json.dumps(keyword, ensure_ascii=True)[1:-1]}%", unique=True
+        ),
+    )
+
+
 class SQLiteDatabase(BaseDatabase):
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         self.DATABASE_URL = f"sqlite+aiosqlite:///{db_path}"
         self.inited = False
+        self._initialize_lock = asyncio.Lock()
         super().__init__()
 
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def enable_foreign_keys(connection, _record):
+            """Enforce event ownership and ancestry on every pooled connection."""
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
     async def initialize(self) -> None:
+        """Serialize schema migration before allowing application traffic."""
+        async with self._initialize_lock:
+            await self._initialize_schema()
+
+    async def _initialize_schema(self) -> None:
         """Initialize the database by creating tables if they do not exist."""
         async with self.engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.create_all)
+            await conn.run_sync(
+                lambda sync_conn: SQLModel.metadata.create_all(
+                    sync_conn,
+                    tables=[
+                        table
+                        for name, table in SQLModel.metadata.tables.items()
+                        if name != "conversations"
+                    ],
+                )
+            )
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
             await conn.execute(text("PRAGMA synchronous=NORMAL"))
@@ -71,32 +175,15 @@ class SQLiteDatabase(BaseDatabase):
             await self._ensure_persona_folder_columns(conn)
             await self._ensure_persona_skills_column(conn)
             await self._ensure_persona_custom_error_message_column(conn)
-            await self._ensure_platform_message_history_checkpoint_column(conn)
+            await self._ensure_platform_message_history_event_columns(conn)
             await self._ensure_chatui_project_workspace_columns(conn)
             await self._ensure_command_stats_schema(conn)
-            await self._ensure_conversation_indexes(conn)
+            # The table-level unique constraint already provides an index for UMO
+            # lookups. Older schemas also created this redundant explicit index.
+            await conn.execute(text("DROP INDEX IF EXISTS ix_umo_aliases_umo"))
             await conn.commit()
-
-    async def _ensure_conversation_indexes(self, conn) -> None:
-        """Create indexes used by the dashboard conversation list.
-
-        Args:
-            conn: Active SQLAlchemy connection used during SQLite initialization.
-        """
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS "
-                "ix_conversations_created_at_inner_id "
-                "ON conversations (created_at DESC, inner_conversation_id DESC)"
-            )
-        )
-        await conn.execute(
-            text(
-                "CREATE INDEX IF NOT EXISTS "
-                "ix_conversations_platform_created_at_inner_id "
-                "ON conversations (platform_id, created_at DESC, inner_conversation_id DESC)"
-            )
-        )
+        await migrate_conversations(self.conversation_store)
+        self.inited = True
 
     async def _ensure_persona_folder_columns(self, conn) -> None:
         """确保 personas 表有 folder_id 和 sort_order 列。
@@ -140,30 +227,61 @@ class SQLiteDatabase(BaseDatabase):
                 text("ALTER TABLE personas ADD COLUMN custom_error_message TEXT")
             )
 
-    async def _ensure_platform_message_history_checkpoint_column(self, conn) -> None:
-        """Ensure platform_message_history has llm_checkpoint_id."""
-        result = await conn.execute(text("PRAGMA table_info(platform_message_history)"))
-        columns = {row[1] for row in result.fetchall()}
+    async def _ensure_platform_message_history_event_columns(self, conn) -> None:
+        """Migrate WebChat associations from legacy markers to event identities.
 
-        if "llm_checkpoint_id" not in columns:
+        Args:
+            conn: Initialization transaction.
+        """
+        for table, old, new in (
+            ("platform_message_history", "llm_checkpoint_id", "turn_id"),
+            ("webchat_threads", "base_checkpoint_id", "base_event_id"),
+        ):
+            columns = {
+                row[1]
+                for row in (
+                    await conn.execute(text(f"PRAGMA table_info({table})"))
+                ).all()
+            }
+            if old in columns and new not in columns:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+                )
+            elif new not in columns:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN {new} VARCHAR")
+                )
+        columns = {
+            row[1]
+            for row in (
+                await conn.execute(text("PRAGMA table_info(platform_message_history)"))
+            ).all()
+        }
+        if "is_active" not in columns:
             await conn.execute(
                 text(
-                    "ALTER TABLE platform_message_history "
-                    "ADD COLUMN llm_checkpoint_id VARCHAR DEFAULT NULL"
+                    "ALTER TABLE platform_message_history ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT 1"
+                )
+            )
+        if "context_event_id" not in columns:
+            await conn.execute(
+                text(
+                    "ALTER TABLE platform_message_history ADD COLUMN context_event_id VARCHAR"
                 )
             )
         await conn.execute(
             text(
-                "CREATE INDEX IF NOT EXISTS "
-                "ix_platform_message_history_llm_checkpoint_id "
-                "ON platform_message_history (llm_checkpoint_id)"
+                "CREATE INDEX IF NOT EXISTS ix_platform_message_history_turn_id ON platform_message_history (turn_id)"
             )
         )
         await conn.execute(
             text(
-                "CREATE INDEX IF NOT EXISTS "
-                "ix_platform_message_history_platform_user_id "
-                "ON platform_message_history (platform_id, user_id, id)"
+                "CREATE INDEX IF NOT EXISTS ix_platform_message_history_context_event_id ON platform_message_history (context_event_id)"
+            )
+        )
+        await conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_platform_message_history_platform_user_id ON platform_message_history (platform_id, user_id, id)"
             )
         )
 
@@ -744,7 +862,6 @@ class SQLiteDatabase(BaseDatabase):
                 )
                 session.add(record)
                 await session.flush()
-                await session.refresh(record)
                 return record
 
     # ====
@@ -752,38 +869,47 @@ class SQLiteDatabase(BaseDatabase):
     # ====
 
     async def get_conversations(self, user_id=None, platform_id=None):
-        async with self.get_db() as session:
+        async with self.get_db(consistent_read=True) as session:
             session: AsyncSession
-            query = select(ConversationV2)
+            query = select(ConversationV3)
 
             if user_id:
-                query = query.where(ConversationV2.user_id == user_id)
+                query = query.where(ConversationV3.umo == user_id)
             if platform_id:
-                query = query.where(ConversationV2.platform_id == platform_id)
+                query = query.where(ConversationV3.platform_id == platform_id)
             # order by
-            query = query.order_by(desc(ConversationV2.created_at))
+            query = query.order_by(desc(ConversationV3.created_at))
             result = await session.execute(query)
 
-            return result.scalars().all()
+            return await self.conversation_store.read_results(
+                session, result.scalars().all()
+            )
 
     async def get_conversation_by_id(self, cid):
-        async with self.get_db() as session:
+        async with self.get_db(consistent_read=True) as session:
             session: AsyncSession
-            query = select(ConversationV2).where(ConversationV2.conversation_id == cid)
+            query = select(ConversationV3).where(ConversationV3.conversation_id == cid)
             result = await session.execute(query)
-            return result.scalar_one_or_none()
+            conv = result.scalar_one_or_none()
+            return (
+                await self.conversation_store.read_result(session, conv)
+                if conv
+                else None
+            )
 
     async def get_all_conversations(self, page=1, page_size=20):
-        async with self.get_db() as session:
+        async with self.get_db(consistent_read=True) as session:
             session: AsyncSession
             offset = (page - 1) * page_size
             result = await session.execute(
-                select(ConversationV2)
-                .order_by(desc(ConversationV2.created_at))
+                select(ConversationV3)
+                .order_by(desc(ConversationV3.created_at))
                 .offset(offset)
                 .limit(page_size),
             )
-            return result.scalars().all()
+            return await self.conversation_store.read_results(
+                session, result.scalars().all()
+            )
 
     async def get_filtered_conversations(
         self,
@@ -794,26 +920,33 @@ class SQLiteDatabase(BaseDatabase):
         include_history=True,
         **kwargs,
     ):
-        async with self.get_db() as session:
+        async with self.get_db(consistent_read=True) as session:
             session: AsyncSession
             # Build the base query with filters
-            base_query = select(ConversationV2)
+            base_query = select(ConversationV3)
             conditions = []
 
             if platform_ids:
-                conditions.append(col(ConversationV2.platform_id).in_(platform_ids))
+                conditions.append(col(ConversationV3.platform_id).in_(platform_ids))
+            # WebChat titles live on the platform session, not on the
+            # conversation row, so the search also matches session titles.
             if search_query:
-                escaped_search_query = json.dumps(
-                    search_query,
-                    ensure_ascii=True,
-                )[1:-1]
                 conditions.append(
                     or_(
-                        col(ConversationV2.title).ilike(f"%{search_query}%"),
-                        col(ConversationV2.user_id).ilike(f"%{search_query}%"),
-                        col(ConversationV2.conversation_id).ilike(f"%{search_query}%"),
-                        col(ConversationV2.content).ilike(f"%{search_query}%"),
-                        col(ConversationV2.content).ilike(f"%{escaped_search_query}%"),
+                        col(ConversationV3.title).ilike(f"%{search_query}%"),
+                        col(ConversationV3.umo).ilike(f"%{search_query}%"),
+                        col(ConversationV3.conversation_id).ilike(f"%{search_query}%"),
+                        _conversation_content_match(search_query),
+                        _webchat_session_title_match(search_query),
+                    )
+                )
+            keyword_query = str(kwargs.get("keyword_query") or "").strip()
+            if keyword_query:
+                conditions.append(
+                    or_(
+                        col(ConversationV3.title).ilike(f"%{keyword_query}%"),
+                        _conversation_content_match(keyword_query),
+                        _webchat_session_title_match(keyword_query),
                     )
                 )
             message_types = kwargs.get("message_types") or []
@@ -821,30 +954,53 @@ class SQLiteDatabase(BaseDatabase):
                 conditions.append(
                     or_(
                         *(
-                            col(ConversationV2.user_id).like(f"%:{msg_type}:%")
+                            col(ConversationV3.umo).like(f"%:{msg_type}:%")
                             for msg_type in message_types
                         )
                     )
                 )
             platforms = kwargs.get("platforms") or []
             if platforms:
-                conditions.append(col(ConversationV2.platform_id).in_(platforms))
+                conditions.append(col(ConversationV3.platform_id).in_(platforms))
             exclude_ids = kwargs.get("exclude_ids") or []
             for exclude_id in exclude_ids:
+                # Match the whole UMO or its platform segment only, so an id
+                # like "astrbot" does not swallow platforms such as
+                # "astrbotweb". Escape LIKE wildcards inside the id itself.
+                escaped = (
+                    exclude_id.replace("\\", "\\\\")
+                    .replace("%", r"\%")
+                    .replace("_", r"\_")
+                )
                 conditions.append(
-                    not_(col(ConversationV2.user_id).like(f"{exclude_id}%"))
+                    not_(
+                        or_(
+                            col(ConversationV3.umo) == exclude_id,
+                            col(ConversationV3.umo).like(f"{escaped}:%", escape="\\"),
+                        )
+                    )
                 )
             exclude_platforms = kwargs.get("exclude_platforms") or []
             if exclude_platforms:
                 conditions.append(
-                    not_(col(ConversationV2.platform_id).in_(exclude_platforms))
+                    not_(col(ConversationV3.platform_id).in_(exclude_platforms))
                 )
+            umo_query = str(kwargs.get("umo_query") or "").strip()
+            if umo_query:
+                conditions.append(col(ConversationV3.umo).ilike(f"%{umo_query}%"))
 
             if conditions:
                 base_query = base_query.where(*conditions)
 
+            group_by_session = bool(kwargs.get("group_by_session", False))
+
             # Get total count matching the filters
-            count_query = select(func.count(ConversationV2.inner_conversation_id))
+            count_target = (
+                func.distinct(ConversationV3.umo)
+                if group_by_session
+                else ConversationV3.id
+            )
+            count_query = select(func.count(count_target))
             if conditions:
                 count_query = count_query.where(*conditions)
             total_count = await session.execute(count_query)
@@ -852,46 +1008,104 @@ class SQLiteDatabase(BaseDatabase):
 
             # Get paginated results
             offset = (page - 1) * page_size
-            result_query = (
-                base_query.order_by(desc(ConversationV2.created_at))
-                .order_by(desc(ConversationV2.inner_conversation_id))
-                .offset(offset)
-                .limit(page_size)
+            sort_by = kwargs.get("sort_by", "created_at")
+            sort_order = kwargs.get("sort_order", "desc")
+            sort_column = (
+                ConversationV3.updated_at
+                if sort_by == "updated_at"
+                else ConversationV3.created_at
             )
-            if not include_history:
-                result_query = result_query.options(defer(ConversationV2.content))
-            if len(platforms) > 1 or len(platform_ids or []) > 1:
-                # SQLite may choose the narrow platform index for IN queries and
-                # then materialize a temporary sort. Force the global ordering
-                # index for multi-platform pages while keeping ORM row mapping.
+            order = sort_column.asc if sort_order == "asc" else sort_column.desc
+            tie_breaker = (
+                ConversationV3.id.asc if sort_order == "asc" else ConversationV3.id.desc
+            )
+            if group_by_session:
+                session_sort = func.max(sort_column).label("session_sort")
+                session_tie_breaker = func.max(ConversationV3.id).label(
+                    "session_tie_breaker"
+                )
+                session_query = select(
+                    ConversationV3.umo,
+                    session_sort,
+                    session_tie_breaker,
+                )
+                if conditions:
+                    session_query = session_query.where(*conditions)
+                session_order = (
+                    session_sort.asc if sort_order == "asc" else session_sort.desc
+                )
+                session_tie_order = (
+                    session_tie_breaker.asc
+                    if sort_order == "asc"
+                    else session_tie_breaker.desc
+                )
+                session_rows = await session.execute(
+                    session_query.group_by(ConversationV3.umo)
+                    .order_by(session_order())
+                    .order_by(session_tie_order())
+                    .offset(offset)
+                    .limit(page_size)
+                )
+                session_ids = [row[0] for row in session_rows.all()]
+                if not session_ids:
+                    return [], total
+                session_rank = case(
+                    {session_id: index for index, session_id in enumerate(session_ids)},
+                    value=ConversationV3.umo,
+                    else_=len(session_ids),
+                )
+                result_query = (
+                    base_query.where(col(ConversationV3.umo).in_(session_ids))
+                    .order_by(session_rank)
+                    .order_by(order())
+                    .order_by(tie_breaker())
+                )
+            else:
+                result_query = (
+                    base_query.order_by(order())
+                    .order_by(tie_breaker())
+                    .offset(offset)
+                    .limit(page_size)
+                )
+            if (
+                not group_by_session
+                and sort_by == "created_at"
+                and (len(platforms) > 1 or len(platform_ids or []) > 1)
+            ):
                 compiled = result_query.compile(
                     dialect=sqlite_dialect(paramstyle="named"),
                     compile_kwargs={"render_postcompile": True},
                 )
                 indexed_sql = compiled.string.replace(
-                    "FROM conversations",
-                    "FROM conversations INDEXED BY "
-                    "ix_conversations_created_at_inner_id",
+                    "FROM conversations_v3",
+                    "FROM conversations_v3 INDEXED BY ix_conversations_v3_created_id",
                     1,
                 )
-                conversation_columns = [
-                    column
-                    for column in ConversationV2.__table__.columns
-                    if include_history or column.name != "content"
-                ]
-                result_query = select(ConversationV2).from_statement(
-                    text(indexed_sql).columns(*conversation_columns),
+                result_query = select(ConversationV3).from_statement(
+                    text(indexed_sql).columns(*ConversationV3.__table__.columns)
                 )
-                if not include_history:
-                    result_query = result_query.options(
-                        defer(ConversationV2.content),
-                    )
                 result = await session.execute(result_query, compiled.params)
             else:
                 result = await session.execute(result_query)
-            conversations = result.scalars().all()
+            conversations = await self.conversation_store.read_results(
+                session, result.scalars().all(), include_history
+            )
 
             return conversations, total
+
+    async def get_conversation_platform_ids(self) -> list[str]:
+        """Return distinct platform IDs referenced by conversation history.
+
+        Returns:
+            Sorted platform IDs that have at least one conversation.
+        """
+        async with self.get_db() as session:
+            result = await session.execute(
+                select(ConversationV3.platform_id)
+                .distinct()
+                .order_by(ConversationV3.platform_id)
+            )
+            return [platform_id for platform_id in result.scalars() if platform_id]
 
     async def create_conversation(
         self,
@@ -904,70 +1118,50 @@ class SQLiteDatabase(BaseDatabase):
         created_at=None,
         updated_at=None,
     ):
-        kwargs = {}
-        if cid:
-            kwargs["conversation_id"] = cid
-        if created_at:
-            kwargs["created_at"] = created_at
-        if updated_at:
-            kwargs["updated_at"] = updated_at
+        conv = await self.conversation_store.create(
+            umo=user_id,
+            platform_id=platform_id,
+            content=content,
+            title=title,
+            persona_id=persona_id,
+            cid=cid,
+            created_at=created_at,
+            updated_at=updated_at,
+        )
         async with self.get_db() as session:
-            session: AsyncSession
-            async with session.begin():
-                new_conversation = ConversationV2(
-                    user_id=user_id,
-                    content=content or [],
-                    platform_id=platform_id,
-                    title=title,
-                    persona_id=persona_id,
-                    **kwargs,
-                )
-                session.add(new_conversation)
-                return new_conversation
+            return await self.conversation_store.read_result(session, conv)
 
     async def update_conversation(
         self, cid, title=None, persona_id=None, content=None, token_usage=None
     ):
-        async with self.get_db() as session:
-            session: AsyncSession
-            async with session.begin():
-                query = update(ConversationV2).where(
-                    col(ConversationV2.conversation_id) == cid,
-                )
-                values = {}
-                if title is not None:
-                    values["title"] = title
-                if persona_id is not None:
-                    values["persona_id"] = persona_id
-                if content is not None:
-                    values["content"] = content
-                if token_usage is not None:
-                    values["token_usage"] = token_usage
-                if not values:
-                    return None
-                query = query.values(**values)
-                await session.execute(query)
+        snapshot = await self.conversation_store.read(cid)
+        if snapshot is None:
+            return None
+        changes = {}
+        if title is not None:
+            changes["title"] = title
+        if persona_id is not None:
+            changes["persona_id"] = persona_id
+        drafts = []
+        if changes or token_usage is not None:
+            payload = {"changes": changes}
+            if token_usage is not None:
+                payload["token_usage"] = token_usage
+            drafts.append({"type": "conversation.updated", "payload": payload})
+        await self.conversation_store.append(
+            cid,
+            drafts,
+            history=content,
+            expected_head=snapshot.revision.head_seq,
+            expected_leaf=snapshot.revision.leaf_event_id,
+        )
         return await self.get_conversation_by_id(cid)
 
     async def delete_conversation(self, cid) -> None:
-        async with self.get_db() as session:
-            session: AsyncSession
-            async with session.begin():
-                await session.execute(
-                    delete(ConversationV2).where(
-                        col(ConversationV2.conversation_id) == cid,
-                    ),
-                )
+        await self.conversation_store.delete(cid=cid)
 
     async def delete_conversations_by_user_id(self, user_id: str) -> None:
-        async with self.get_db() as session:
-            session: AsyncSession
-            async with session.begin():
-                await session.execute(
-                    delete(ConversationV2).where(
-                        col(ConversationV2.user_id) == user_id
-                    ),
-                )
+        await self.conversation_store.delete(umo=user_id)
 
     async def get_session_conversations(
         self,
@@ -980,26 +1174,24 @@ class SQLiteDatabase(BaseDatabase):
         async with self.get_db() as session:
             session: AsyncSession
             offset = (page - 1) * page_size
+            conversation_id = col(Preference.value)["val"].as_string()
 
             base_query = (
                 select(
                     col(Preference.scope_id).label("session_id"),
-                    func.json_extract(Preference.value, "$.val").label(
-                        "conversation_id",
-                    ),  # type: ignore
-                    col(ConversationV2.persona_id).label("persona_id"),
-                    col(ConversationV2.title).label("title"),
+                    conversation_id.label("conversation_id"),
+                    col(ConversationV3.persona_id).label("persona_id"),
+                    col(ConversationV3.title).label("title"),
                     col(Persona.persona_id).label("persona_name"),
                 )
                 .select_from(Preference)
                 .outerjoin(
-                    ConversationV2,
-                    func.json_extract(Preference.value, "$.val")
-                    == ConversationV2.conversation_id,
+                    ConversationV3,
+                    conversation_id == ConversationV3.conversation_id,
                 )
                 .outerjoin(
                     Persona,
-                    col(ConversationV2.persona_id) == Persona.persona_id,
+                    col(ConversationV3.persona_id) == Persona.persona_id,
                 )
                 .where(Preference.scope == "umo", Preference.key == "sel_conv_id")
             )
@@ -1010,7 +1202,7 @@ class SQLiteDatabase(BaseDatabase):
                 base_query = base_query.where(
                     or_(
                         col(Preference.scope_id).ilike(search_pattern),
-                        col(ConversationV2.title).ilike(search_pattern),
+                        col(ConversationV3.title).ilike(search_pattern),
                         col(Persona.persona_id).ilike(search_pattern),
                     ),
                 )
@@ -1035,13 +1227,12 @@ class SQLiteDatabase(BaseDatabase):
                 select(func.count(col(Preference.scope_id)))
                 .select_from(Preference)
                 .outerjoin(
-                    ConversationV2,
-                    func.json_extract(Preference.value, "$.val")
-                    == ConversationV2.conversation_id,
+                    ConversationV3,
+                    conversation_id == ConversationV3.conversation_id,
                 )
                 .outerjoin(
                     Persona,
-                    col(ConversationV2.persona_id) == Persona.persona_id,
+                    col(ConversationV3.persona_id) == Persona.persona_id,
                 )
                 .where(Preference.scope == "umo", Preference.key == "sel_conv_id")
             )
@@ -1052,7 +1243,7 @@ class SQLiteDatabase(BaseDatabase):
                 count_base_query = count_base_query.where(
                     or_(
                         col(Preference.scope_id).ilike(search_pattern),
-                        col(ConversationV2.title).ilike(search_pattern),
+                        col(ConversationV3.title).ilike(search_pattern),
                         col(Persona.persona_id).ilike(search_pattern),
                     ),
                 )
@@ -1085,21 +1276,124 @@ class SQLiteDatabase(BaseDatabase):
         content,
         sender_id=None,
         sender_name=None,
-        llm_checkpoint_id=None,
+        turn_id=None,
         max_messages=None,
     ):
         """Insert a new platform message history record."""
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
+                if turn_id:
+                    # Serialize link lookup and insertion with context-event writes.
+                    # Otherwise both writers can miss the other one's pending row.
+                    await session.execute(text("BEGIN IMMEDIATE"))
                 new_history = PlatformMessageHistory(
                     platform_id=platform_id,
                     user_id=user_id,
                     content=content,
                     sender_id=sender_id,
                     sender_name=sender_name,
-                    llm_checkpoint_id=llm_checkpoint_id,
+                    turn_id=turn_id,
                 )
+                if turn_id:
+                    role = "user" if content.get("type") == "user" else "assistant"
+                    turn_conversation = (
+                        select(ConversationEvent.conversation_ref)
+                        .where(
+                            ConversationEvent.event_id == turn_id,
+                            ConversationEvent.type == "turn.started",
+                        )
+                        .scalar_subquery()
+                    )
+                    baseline_messages = func.json_each(
+                        ConversationEvent.payload, "$.messages"
+                    ).table_valued("key", "value")
+                    baseline_role = (
+                        select(
+                            func.json_extract(
+                                baseline_messages.c.value, "$.message.role"
+                            )
+                        )
+                        .where(
+                            ~func.coalesce(
+                                func.json_extract(
+                                    baseline_messages.c.value, "$.message._no_save"
+                                ),
+                                False,
+                            )
+                        )
+                        .order_by(baseline_messages.c.key.desc())
+                        .limit(1)
+                        .correlate(ConversationEvent)
+                        .scalar_subquery()
+                    )
+                    query = (
+                        select(ConversationEvent.event_id)
+                        .where(
+                            ConversationEvent.conversation_ref == turn_conversation,
+                            ConversationEvent.seq
+                            > select(ConversationEvent.seq)
+                            .where(ConversationEvent.event_id == turn_id)
+                            .scalar_subquery(),
+                            ConversationEvent.payload["turn_id"].as_string() == turn_id,
+                            or_(
+                                (ConversationEvent.type == "message.appended")
+                                & (
+                                    func.coalesce(
+                                        ConversationEvent.payload[
+                                            "include_in_context"
+                                        ].as_boolean(),
+                                        True,
+                                    )
+                                )
+                                & (
+                                    ~func.coalesce(
+                                        ConversationEvent.payload["message"][
+                                            "_no_save"
+                                        ].as_boolean(),
+                                        False,
+                                    )
+                                )
+                                & (
+                                    ConversationEvent.payload["message"][
+                                        "role"
+                                    ].as_string()
+                                    == role
+                                ),
+                                (ConversationEvent.type == "context.rebased")
+                                & (baseline_role == role),
+                            ),
+                        )
+                        .order_by(
+                            ConversationEvent.seq.asc()
+                            if role == "user"
+                            else ConversationEvent.seq.desc()
+                        )
+                        .limit(1)
+                    )
+                    new_history.context_event_id = (
+                        await session.execute(query)
+                    ).scalar_one_or_none()
+                    if new_history.context_event_id:
+                        # Older databases may have an automatic snapshot for this position.
+                        snapshot_id = (
+                            await session.execute(
+                                text("""SELECT event_id FROM conversation_events
+                                    WHERE conversation_ref=(SELECT conversation_ref
+                                        FROM conversation_events WHERE event_id=:turn_id)
+                                      AND type='context.rebased'
+                                      AND json_extract(payload,'$.reason')='snapshot'
+                                      AND json_extract(payload,'$.origin')='system'
+                                      AND json_extract(payload,'$.source_event_id')=:source
+                                    ORDER BY seq DESC LIMIT 1"""),
+                                {
+                                    "turn_id": turn_id,
+                                    "source": new_history.context_event_id,
+                                },
+                            )
+                        ).scalar_one_or_none()
+                        if snapshot_id:
+                            new_history.context_event_id = snapshot_id
                 session.add(new_history)
                 await session.flush()
                 if max_messages is not None:
@@ -1125,14 +1419,15 @@ class SQLiteDatabase(BaseDatabase):
         self,
         message_id: int,
         content: dict | None = None,
-        llm_checkpoint_id: str | None = None,
+        turn_id: str | None = None,
     ) -> None:
         """Update a platform message history record."""
         values = {}
         if content is not None:
             values["content"] = content
-        if llm_checkpoint_id is not None:
-            values["llm_checkpoint_id"] = llm_checkpoint_id
+        if turn_id is not None:
+            values["turn_id"] = turn_id
+            values["context_event_id"] = None
         if not values:
             return
 
@@ -1166,7 +1461,8 @@ class SQLiteDatabase(BaseDatabase):
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
-                now = datetime.now()
+                # created_at stores UTC wall-clock values, so compare in UTC.
+                now = datetime.now(timezone.utc)
                 cutoff_time = now - timedelta(seconds=offset_sec)
                 await session.execute(
                     delete(PlatformMessageHistory).where(
@@ -1192,6 +1488,7 @@ class SQLiteDatabase(BaseDatabase):
                 .where(
                     PlatformMessageHistory.platform_id == platform_id,
                     PlatformMessageHistory.user_id == user_id,
+                    PlatformMessageHistory.is_active == True,  # noqa: E712
                 )
                 .order_by(
                     desc(PlatformMessageHistory.created_at),
@@ -1200,6 +1497,30 @@ class SQLiteDatabase(BaseDatabase):
             )
             result = await session.execute(query.offset(offset).limit(page_size))
             return result.scalars().all()
+
+    async def count_platform_message_history(
+        self,
+        platform_id: str,
+        user_id: str,
+    ) -> int:
+        """Count platform message history records for a scope.
+
+        Args:
+            platform_id: Platform identifier used to partition history.
+            user_id: Platform user or session identifier.
+
+        Returns:
+            Number of records matching the platform/user scope.
+        """
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(
+                select(func.count(PlatformMessageHistory.id)).where(
+                    PlatformMessageHistory.platform_id == platform_id,
+                    PlatformMessageHistory.user_id == user_id,
+                )
+            )
+            return int(result.scalar_one() or 0)
 
     async def get_platform_message_history_by_id(
         self, message_id: int
@@ -1218,7 +1539,7 @@ class SQLiteDatabase(BaseDatabase):
         creator: str,
         parent_session_id: str,
         parent_message_id: int,
-        base_checkpoint_id: str,
+        base_event_id: str,
         selected_text: str,
     ) -> WebChatThread:
         """Create a WebChat side thread."""
@@ -1229,7 +1550,7 @@ class SQLiteDatabase(BaseDatabase):
                     creator=creator,
                     parent_session_id=parent_session_id,
                     parent_message_id=parent_message_id,
-                    base_checkpoint_id=base_checkpoint_id,
+                    base_event_id=base_event_id,
                     selected_text=selected_text,
                 )
                 session.add(thread)
@@ -1690,10 +2011,12 @@ class SQLiteDatabase(BaseDatabase):
         return await self.get_persona_folder_by_id(folder_id)
 
     async def delete_persona_folder(self, folder_id: str) -> None:
-        """Delete a persona folder by its folder_id.
+        """Delete a folder, moving its direct personas and child folders to root.
 
-        Note: This will also set folder_id to NULL for all personas in this folder,
-        moving them to the root directory.
+        Descendant folders retain their contents and internal hierarchy.
+
+        Args:
+            folder_id: ID of the folder to delete.
         """
         async with self.get_db() as session:
             session: AsyncSession
@@ -1703,6 +2026,12 @@ class SQLiteDatabase(BaseDatabase):
                     update(Persona)
                     .where(col(Persona.folder_id) == folder_id)
                     .values(folder_id=None)
+                )
+                # Preserve child subtrees by moving them to the root directory.
+                await session.execute(
+                    update(PersonaFolder)
+                    .where(col(PersonaFolder.parent_id) == folder_id)
+                    .values(parent_id=None)
                 )
                 # Delete the folder
                 await session.execute(
@@ -2450,7 +2779,9 @@ class SQLiteDatabase(BaseDatabase):
             total = int(total_result.scalar_one() or 0)
 
             result_query = (
-                base_query.order_by(desc(PlatformSession.updated_at))
+                base_query.order_by(
+                    desc(PlatformSession.updated_at), desc(PlatformSession.session_id)
+                )
                 .offset(offset)
                 .limit(page_size)
             )
@@ -2500,30 +2831,80 @@ class SQLiteDatabase(BaseDatabase):
         auto_name: str | None,
         user_alias: str | None,
     ) -> UmoAlias:
-        """Create or update alias metadata for a UMO."""
+        """Create or replace user-controlled alias metadata for a UMO.
+
+        Args:
+            umo: Unified message origin to name.
+            creator_sender_id: Sender responsible for the manual alias update.
+            auto_name: Latest name discovered from platform metadata.
+            user_alias: User-controlled display alias.
+
+        Returns:
+            Persisted UMO alias record.
+        """
+        now = datetime.now(timezone.utc)
+        statement = sqlite_insert(UmoAlias).values(
+            umo=umo,
+            creator_sender_id=creator_sender_id,
+            auto_name=auto_name,
+            user_alias=user_alias,
+            created_at=now,
+            updated_at=now,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[UmoAlias.umo],
+            set_={
+                "creator_sender_id": statement.excluded.creator_sender_id,
+                "auto_name": statement.excluded.auto_name,
+                "user_alias": statement.excluded.user_alias,
+                "updated_at": now,
+            },
+        )
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
+                await session.execute(statement)
                 result = await session.execute(
                     select(UmoAlias).where(col(UmoAlias.umo) == umo)
                 )
-                alias = result.scalar_one_or_none()
-                if alias:
-                    alias.creator_sender_id = creator_sender_id
-                    alias.auto_name = auto_name
-                    alias.user_alias = user_alias
-                    alias.updated_at = datetime.now(timezone.utc)
-                else:
-                    alias = UmoAlias(
-                        umo=umo,
-                        creator_sender_id=creator_sender_id,
-                        auto_name=auto_name,
-                        user_alias=user_alias,
-                    )
-                    session.add(alias)
-                await session.flush()
-                await session.refresh(alias)
-                return alias
+                return result.scalar_one()
+
+    async def upsert_umo_auto_name(
+        self,
+        umo: str,
+        creator_sender_id: str,
+        auto_name: str,
+    ) -> None:
+        """Persist an automatic UMO name without changing its manual alias.
+
+        Args:
+            umo: Unified message origin to name.
+            creator_sender_id: Sender that first caused the UMO to be recorded.
+            auto_name: Name discovered from the inbound platform message.
+        """
+        now = datetime.now(timezone.utc)
+        statement = sqlite_insert(UmoAlias).values(
+            umo=umo,
+            creator_sender_id=creator_sender_id,
+            auto_name=auto_name,
+            user_alias=None,
+            created_at=now,
+            updated_at=now,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[UmoAlias.umo],
+            set_={
+                "auto_name": statement.excluded.auto_name,
+                "updated_at": now,
+            },
+            where=col(UmoAlias.auto_name).is_distinct_from(
+                statement.excluded.auto_name
+            ),
+        )
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(statement)
 
     async def get_umo_alias(self, umo: str) -> UmoAlias | None:
         """Get alias metadata for one UMO."""
@@ -2546,6 +2927,113 @@ class SQLiteDatabase(BaseDatabase):
                 query = query.where(col(UmoAlias.umo).in_(umos))
             result = await session.execute(query)
             return list(result.scalars().all())
+
+    # ====
+    # UMO Sender Management
+    # ====
+
+    async def upsert_umo_sender(
+        self, umo: str, sender_id: str, sender_name: str
+    ) -> None:
+        """Insert a sender or update a changed, nonempty name.
+
+        Args:
+            umo: Unified message origin containing the sender.
+            sender_id: Sender identifier reported by the platform.
+            sender_name: Latest display name, or an empty string if unavailable.
+        """
+        if not sender_id:
+            return
+        now = datetime.now(timezone.utc)
+        statement = sqlite_insert(UmoSender).values(
+            umo=umo,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            created_at=now,
+            updated_at=now,
+        )
+        statement = statement.on_conflict_do_update(
+            index_elements=[UmoSender.umo, UmoSender.sender_id],
+            set_={"sender_name": statement.excluded.sender_name, "updated_at": now},
+            where=(statement.excluded.sender_name != "")
+            & col(UmoSender.sender_name).is_distinct_from(
+                statement.excluded.sender_name
+            ),
+        )
+        async with self.get_db() as session:
+            async with session.begin():
+                await session.execute(statement)
+
+    async def get_umo_senders(
+        self,
+        search: str = "",
+        limit: int = 50,
+        sender_ids: list[str] | None = None,
+        offset: int = 0,
+    ) -> list[tuple[UmoSender, UmoAlias | None]]:
+        """Search sender metadata joined to session aliases.
+
+        Args:
+            search: Literal substring matched against sender and session metadata.
+            limit: Maximum number of results to return.
+            sender_ids: Resolve the latest record per exact sender ID when provided.
+            offset: Number of deduplicated results to skip.
+
+        Returns:
+            The latest matching sender and optional alias per platform and sender
+            ID, most recently updated first. Exact ID resolution returns one
+            record per ID instead.
+        """
+        query = select(UmoSender, UmoAlias).outerjoin(
+            UmoAlias, col(UmoSender.umo) == col(UmoAlias.umo)
+        )
+        if sender_ids is not None:
+            if not sender_ids:
+                return []
+            query = query.where(col(UmoSender.sender_id).in_(sender_ids))
+        if search:
+            query = query.where(
+                or_(
+                    *(
+                        column.icontains(search, autoescape=True)
+                        for column in (
+                            col(UmoSender.sender_id),
+                            col(UmoSender.sender_name),
+                            col(UmoSender.umo),
+                            col(UmoAlias.auto_name),
+                            col(UmoAlias.user_alias),
+                        )
+                    )
+                )
+            )
+        # Derive the instance ID from UMO; deduplicate before limiting results.
+        platform_id = func.substr(
+            UmoSender.umo, 1, func.instr(col(UmoSender.umo) + ":", ":") - 1
+        )
+        ranked = query.with_only_columns(
+            col(UmoSender.id),
+            func.row_number()
+            .over(
+                partition_by=(
+                    [UmoSender.sender_id]
+                    if sender_ids is not None
+                    else [platform_id, UmoSender.sender_id]
+                ),
+                order_by=(col(UmoSender.updated_at).desc(), col(UmoSender.id).desc()),
+            )
+            .label("rank"),
+        ).subquery()
+        query = query.where(
+            col(UmoSender.id).in_(select(ranked.c.id).where(ranked.c.rank == 1))
+        )
+        query = (
+            query.order_by(col(UmoSender.updated_at).desc(), col(UmoSender.id).desc())
+            .offset(offset)
+            .limit(limit)
+        )
+        async with self.get_db() as session:
+            result = await session.execute(query)
+            return [(sender, alias) for sender, alias in result.all()]
 
     # ====
     # ChatUI Project Management

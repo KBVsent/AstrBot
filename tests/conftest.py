@@ -111,6 +111,26 @@ def temp_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def require_symlink(tmp_path: Path) -> Path:
+    """Skip the test when symlink creation is denied by the OS.
+
+    Windows only allows symbolic links with admin or developer-mode
+    privileges, so tests that build symlink fixtures cannot run there.
+    """
+    probe = tmp_path / ".symlink_probe"
+    try:
+        probe.symlink_to(tmp_path)
+    except OSError as exc:
+        # 1314 (ERROR_PRIVILEGE_NOT_HELD): Windows requires admin or
+        # developer mode. Anything else is a real error and must fail.
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation is not permitted on this platform")
+        raise
+    probe.unlink()
+    return tmp_path
+
+
+@pytest.fixture
 def event_queue() -> Queue:
     """Create a shared asyncio queue fixture for tests."""
     return Queue()
@@ -248,7 +268,7 @@ def astrbot_config(temp_config_file: Path):
 @pytest.fixture
 def main_agent_build_config():
     """创建 MainAgentBuildConfig 实例。"""
-    from astrbot.core.astr_main_agent import MainAgentBuildConfig
+    from astrbot.core.astr_agent_runtime.main_agent import MainAgentBuildConfig
 
     return MainAgentBuildConfig(
         tool_call_timeout=60,
@@ -321,7 +341,7 @@ async def mock_context(
     astrbot_config_mgr = MagicMock()
     knowledge_base_manager = MagicMock()
     cron_manager = MagicMock()
-    subagent_orchestrator = None
+    subagents = None
 
     context = Context(
         event_queue,
@@ -335,7 +355,7 @@ async def mock_context(
         astrbot_config_mgr,
         knowledge_base_manager,
         cron_manager,
-        subagent_orchestrator,
+        subagents,
     )
 
     return context
@@ -383,3 +403,10 @@ def pytest_runtest_setup(item):
             f"TEST_{required_platform.upper()}_ENABLED"
         ):
             pytest.skip(f"TEST_{required_platform.upper()}_ENABLED not set")
+
+
+@pytest_asyncio.fixture
+async def database(temp_db):
+    """Provide an initialized SQLite database for event-storage tests."""
+    await temp_db.initialize()
+    return temp_db

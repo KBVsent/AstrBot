@@ -1,4 +1,5 @@
 import base64
+import builtins
 import json
 from collections.abc import AsyncGenerator
 from typing import Any, Literal
@@ -16,6 +17,10 @@ from astrbot.core.agent.message import AudioURLPart, ContentPart, ImageURLPart, 
 from astrbot.core.exceptions import EmptyModelOutputError
 from astrbot.core.provider.entities import LLMResponse, TokenUsage
 from astrbot.core.provider.func_tool_manager import ToolSet
+from astrbot.core.provider.request_observer import (
+    RequestAttemptObserver,
+    request_recorder_kwargs,
+)
 from astrbot.core.utils.media_utils import (
     describe_media_ref,
     resolve_media_ref_to_base64_data,
@@ -26,6 +31,7 @@ from astrbot.core.utils.network_utils import (
     log_connection_failure,
 )
 
+from ..headers import build_conversation_headers, build_provider_headers
 from ..register import register_provider_adapter
 from .request_retry import retry_provider_request, retry_provider_request_context
 
@@ -71,12 +77,14 @@ class ProviderAnthropic(Provider):
         *,
         required_headers: dict[str, str] | None = None,
     ) -> dict[str, str] | None:
-        merged_headers = cls._normalize_custom_headers(provider_config) or {}
+        merged_headers = build_provider_headers(
+            cls._normalize_custom_headers(provider_config)
+        )
         if required_headers:
             for header_name, header_value in required_headers.items():
                 if not merged_headers.get(header_name, "").strip():
                     merged_headers[header_name] = header_value
-        return merged_headers or None
+        return merged_headers
 
     def __init__(
         self,
@@ -108,11 +116,17 @@ class ProviderAnthropic(Provider):
         self.chosen_api_key: str = ""
         self.api_keys: list = super().get_keys()
         self.chosen_api_key = self.api_keys[0] if len(self.api_keys) > 0 else ""
+        # SDK 2.x uses Bearer auth; compatible endpoints may require X-Api-Key.
+        default_headers = {"X-Api-Key": self.chosen_api_key}
+        for name, value in (self.custom_headers or {}).items():
+            # Match older SDK casing to avoid duplicate API key headers.
+            name = "X-Api-Key" if name.lower() == "x-api-key" else name
+            default_headers[name] = value
         self.client = AsyncAnthropic(
             api_key=self.chosen_api_key,
             timeout=self.timeout,
             base_url=self.base_url,
-            default_headers=self.custom_headers,
+            default_headers=default_headers,
             http_client=self._create_http_client(provider_config),
         )
 
@@ -445,15 +459,21 @@ class ProviderAnthropic(Provider):
         if usage is None:
             return TokenUsage()
         # https://docs.claude.com/en/docs/build-with-claude/prompt-caching#tracking-cache-performance
+        # Anthropic's input_tokens excludes cache served reads AND writes, so
+        # cache_creation_input_tokens must be added back into input_other to
+        # keep total input (and context-occupancy stats) accurate.
         return TokenUsage(
-            input_other=usage.input_tokens or 0,
+            input_other=(usage.input_tokens or 0)
+            + (usage.cache_creation_input_tokens or 0),
             input_cached=usage.cache_read_input_tokens or 0,
             output=usage.output_tokens or 0,
         )
 
     def _update_usage(self, token_usage: TokenUsage, usage: MessageDeltaUsage) -> None:
         if usage.input_tokens is not None:
-            token_usage.input_other = usage.input_tokens
+            token_usage.input_other = usage.input_tokens + (
+                usage.cache_creation_input_tokens or 0
+            )
         if usage.cache_read_input_tokens is not None:
             token_usage.input_cached = usage.cache_read_input_tokens
         if usage.output_tokens is not None:
@@ -506,6 +526,8 @@ class ProviderAnthropic(Provider):
         tools: ToolSet | None,
         *,
         request_max_retries: int | None = None,
+        request_event_recorder: RequestAttemptObserver | None = None,
+        conversation_id: str | None = None,
     ) -> LLMResponse:
         if tools:
             if tool_list := tools.get_func_desc_anthropic_style():
@@ -514,7 +536,25 @@ class ProviderAnthropic(Provider):
                     payloads.get("tool_choice", "auto")
                 )
 
-        extra_body = self.provider_config.get("custom_extra_body", {})
+        extra_body = self.provider_config.get("custom_extra_body") or {}
+        if not isinstance(extra_body, dict):
+            # An explicit null or malformed custom body carries nothing to merge.
+            extra_body = {}
+        # Server-side tools declared in the custom body (e.g. web search on
+        # Anthropic-compatible endpoints) must coexist with the registered
+        # function tools: extra_body replaces same-named top-level keys,
+        # which would silently drop them. Tool definitions get the same
+        # override semantics: a custom tool replaces a registered tool of
+        # the same name instead of duplicating it (the API rejects duplicate
+        # tool names).
+        custom_tools = extra_body.get("tools")
+        if isinstance(custom_tools, list) and isinstance(payloads.get("tools"), list):
+            merged = {}
+            for tool in [*payloads["tools"], *custom_tools]:
+                key = tool.get("name") if isinstance(tool, dict) else None
+                merged[key if key else ("_", id(tool))] = tool
+            payloads["tools"] = list(merged.values())
+            extra_body = {k: v for k, v in extra_body.items() if k != "tools"}
 
         if "max_tokens" not in payloads:
             payloads["max_tokens"] = 65536
@@ -526,9 +566,13 @@ class ProviderAnthropic(Provider):
             completion = await retry_provider_request(
                 "Anthropic",
                 lambda: self.client.messages.create(
-                    **payloads, stream=False, extra_body=extra_body
+                    **payloads,
+                    stream=False,
+                    extra_body=extra_body,
+                    extra_headers=build_conversation_headers(conversation_id),
                 ),
                 max_attempts=request_max_retries,
+                request_event_recorder=request_event_recorder,
             )
         except httpx.RequestError as e:
             proxy = self.provider_config.get("proxy", "")
@@ -550,10 +594,12 @@ class ProviderAnthropic(Provider):
 
         llm_response = LLMResponse(role="assistant")
 
+        text_parts: list[str] = []
         for content_block in completion.content:
             if content_block.type == "text":
-                completion_text = str(content_block.text).strip()
-                llm_response.completion_text = completion_text
+                # Responses with web search/citations carry several text blocks;
+                # concatenate them like the streaming path does.
+                text_parts.append(str(content_block.text))
 
             if content_block.type == "thinking":
                 reasoning_content = str(content_block.thinking).strip()
@@ -564,6 +610,9 @@ class ProviderAnthropic(Provider):
                 llm_response.tools_call_args.append(content_block.input)
                 llm_response.tools_call_name.append(content_block.name)
                 llm_response.tools_call_ids.append(content_block.id)
+
+        if text_parts:
+            llm_response.completion_text = "".join(text_parts).strip()
 
         llm_response.id = completion.id
         llm_response.usage = self._extract_usage(completion.usage)
@@ -599,6 +648,8 @@ class ProviderAnthropic(Provider):
         tools: ToolSet | None,
         *,
         request_max_retries: int | None = None,
+        request_event_recorder: RequestAttemptObserver | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[LLMResponse, None]:
         if tools:
             if tool_list := tools.get_func_desc_anthropic_style():
@@ -614,7 +665,20 @@ class ProviderAnthropic(Provider):
         final_tool_calls = []
         id = None
         usage = TokenUsage()
-        extra_body = self.provider_config.get("custom_extra_body", {})
+        extra_body = self.provider_config.get("custom_extra_body") or {}
+        if not isinstance(extra_body, dict):
+            extra_body = {}
+        # See _query: custom server-side tools must not replace the
+        # registered function tools, and a name collision overrides
+        # instead of duplicating.
+        custom_tools = extra_body.get("tools")
+        if isinstance(custom_tools, list) and isinstance(payloads.get("tools"), list):
+            merged = {}
+            for tool in [*payloads["tools"], *custom_tools]:
+                key = tool.get("name") if isinstance(tool, dict) else None
+                merged[key if key else ("_", builtins.id(tool))] = tool
+            payloads["tools"] = list(merged.values())
+            extra_body = {k: v for k, v in extra_body.items() if k != "tools"}
         reasoning_content = ""
         reasoning_signature = ""
 
@@ -626,8 +690,13 @@ class ProviderAnthropic(Provider):
 
         async with retry_provider_request_context(
             "Anthropic",
-            lambda: self.client.messages.stream(**payloads, extra_body=extra_body),
+            lambda: self.client.messages.stream(
+                **payloads,
+                extra_body=extra_body,
+                extra_headers=build_conversation_headers(conversation_id),
+            ),
             max_attempts=request_max_retries,
+            request_event_recorder=request_event_recorder,
         ) as stream:
             assert isinstance(stream, anthropic.AsyncMessageStream)
             async for event in stream:
@@ -647,10 +716,15 @@ class ProviderAnthropic(Provider):
                         )
                     elif event.content_block.type == "tool_use":
                         # 工具使用块开始，初始化缓冲区
+                        # Keep the input from the start event; streamed deltas
+                        # replace it only when they carry JSON.
+                        start_input = event.content_block.input
                         tool_use_buffer[event.index] = {
                             "id": event.content_block.id,
                             "name": event.content_block.name,
-                            "input": {},
+                            "input": start_input
+                            if isinstance(start_input, dict)
+                            else {},
                         }
 
                 elif event.type == "content_block_delta":
@@ -695,7 +769,8 @@ class ProviderAnthropic(Provider):
                         # 解析完整的工具调用
                         tool_info = tool_use_buffer[event.index]
                         try:
-                            if "input_json" in tool_info:
+                            # 无参数的工具只会收到一个空的 partial_json
+                            if tool_info.get("input_json"):
                                 tool_info["input"] = json.loads(tool_info["input_json"])
 
                             # 添加到最终结果
@@ -767,8 +842,10 @@ class ProviderAnthropic(Provider):
         extra_user_content_parts=None,
         tool_choice: Literal["auto", "any", "tool", "none"] | dict[str, str] = "auto",
         request_max_retries: int | None = None,
+        request_event_recorder: RequestAttemptObserver | None = None,
         **kwargs,
     ) -> LLMResponse:
+        conversation_id = kwargs.pop("conversation_id", None)
         if contexts is None:
             contexts = []
         new_record = None
@@ -816,10 +893,15 @@ class ProviderAnthropic(Provider):
 
         llm_response = None
         try:
+            query_kwargs = {}
+            if conversation_id:
+                query_kwargs["conversation_id"] = conversation_id
             llm_response = await self._query(
                 payloads,
                 func_tool,
                 request_max_retries=request_max_retries,
+                **request_recorder_kwargs(self._query, request_event_recorder),
+                **query_kwargs,
             )
         except Exception as e:
             raise e
@@ -840,8 +922,10 @@ class ProviderAnthropic(Provider):
         extra_user_content_parts=None,
         tool_choice: Literal["auto", "any", "tool", "none"] | dict[str, str] = "auto",
         request_max_retries: int | None = None,
+        request_event_recorder: RequestAttemptObserver | None = None,
         **kwargs,
     ):
+        conversation_id = kwargs.pop("conversation_id", None)
         if contexts is None:
             contexts = []
         new_record = None
@@ -886,10 +970,15 @@ class ProviderAnthropic(Provider):
                 else system_prompt
             )
 
+        query_kwargs = {}
+        if conversation_id:
+            query_kwargs["conversation_id"] = conversation_id
         async for llm_response in self._query_stream(
             payloads,
             func_tool,
             request_max_retries=request_max_retries,
+            **request_recorder_kwargs(self._query_stream, request_event_recorder),
+            **query_kwargs,
         ):
             yield llm_response
 

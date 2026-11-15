@@ -28,12 +28,27 @@ import logging
 import time
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import At, AtAll, Plain, Record, Reply
+from astrbot.api.message_components import (
+    ActionRow,
+    At,
+    AtAll,
+    Button,
+    ButtonInteraction,
+    Plain,
+    Record,
+    Reply,
+)
 from astrbot.core.message.components import Image
+from astrbot.core.platform.button_interaction import (
+    decode_button_callback,
+    encode_button_callback,
+)
 from astrbot.core.platform.sources.line import line_media
 from astrbot.core.platform.sources.line.components import (
     LineFlex,
@@ -52,6 +67,7 @@ from astrbot.core.platform.sources.line.line_api import (
 )
 from astrbot.core.platform.sources.line.line_cache import LineQuoteStore
 from astrbot.core.platform.sources.line.line_event import (
+    _component_to_message_object,
     build_line_batch,
     finalize_line_messages,
     remember_sent_messages,
@@ -103,6 +119,12 @@ def make_adapter() -> LinePlatformAdapter:
         return {"group_name": f"Group of {group_id}", "group_avatar": "https://a/i.png"}
 
     adapter.line_api.get_group_summary = fake_group_summary  # type: ignore[method-assign]
+
+    async def unavailable(*_args) -> None:
+        return None
+
+    adapter.line_api.get_chat_member_count = unavailable  # type: ignore[method-assign]
+    adapter.line_api.get_chat_member_ids = unavailable  # type: ignore[method-assign]
     return adapter
 
 
@@ -1200,6 +1222,7 @@ async def test_preprocess_stage_pre_ack_loading_is_opt_in():
             self.is_at_or_wake_command = woken
             self.callback = callback
             self.typing = 0
+            self.unified_msg_origin = f"{platform}:FriendMessage:U1"
 
         def get_platform_name(self) -> str:
             return self.platform
@@ -1218,10 +1241,12 @@ async def test_preprocess_stage_pre_ack_loading_is_opt_in():
 
     async def run(config: dict, event) -> None:
         stage = PreProcessStage()
-        # 只装本用例会走到的依赖：STT 关闭后 plugin_manager / ctx 都不会被触碰。
+        # 只装本用例会走到的依赖：STT 开关按会话读配置，这里给空配置即关闭。
         stage.config = config  # type: ignore[attr-defined]
         stage.platform_settings = {}
-        stage.stt_settings = {}
+        stage.plugin_manager = SimpleNamespace(  # type: ignore[assignment]
+            context=SimpleNamespace(get_config=lambda umo=None: {})
+        )
         result = await stage.process(event)
         if result is not None:
             async for _ in result:
@@ -1692,3 +1717,225 @@ async def test_rich_menu_network_error_is_classified(monkeypatch):
     result = await client.delete_rich_menu("rm-1")
     assert result.ok is False
     assert result.error_category is LineErrorCategory.NETWORK_ERROR
+
+
+# ------------------------------------------------------------------ 通用按钮
+
+
+@pytest.mark.asyncio
+async def test_line_action_row_builds_template_actions():
+    row = ActionRow(
+        fallback_text="Choose an action",
+        buttons=[
+            Button(
+                id="approve",
+                label="Approve",
+                action=Button.CallbackAction(data={"request_id": 42}),
+            ),
+            Button(
+                id="docs",
+                label="Documentation",
+                action=Button.UrlAction(url="https://example.com/docs"),
+            ),
+        ],
+    )
+
+    batch = await build_line_batch(MessageChain(chain=[row]))
+
+    assert len(batch.messages) == 1
+    message = batch.messages[0]
+    assert message["type"] == "template"
+    assert message["altText"] == "Choose an action"
+    actions = message["template"]["actions"]
+    assert actions[1] == {
+        "type": "uri",
+        "label": "Documentation",
+        "uri": "https://example.com/docs",
+    }
+    action_id, data = decode_button_callback(actions[0]["data"])
+    assert action_id == "approve"
+    assert data == {"request_id": 42}
+
+
+@pytest.mark.asyncio
+async def test_line_action_row_uses_compact_postback_token_for_large_data():
+    row = ActionRow(
+        buttons=[
+            Button(
+                id="oversized",
+                label="Oversized",
+                action=Button.CallbackAction(data={"value": "x" * 300}),
+            )
+        ]
+    )
+
+    message = await _component_to_message_object(row, None)
+
+    assert message is not None
+    callback_data = message["template"]["actions"][0]["data"]
+    assert len(callback_data.encode("utf-8")) <= 300
+    assert decode_button_callback(callback_data) == (
+        "oversized",
+        {"value": "x" * 300},
+    )
+
+
+def _postback_event(data: str) -> dict:
+    return {
+        "type": "postback",
+        "mode": "active",
+        "timestamp": 1_700_000_000_000,
+        "webhookEventId": "event-1",
+        "source": {"type": "group", "groupId": "group-1", "userId": "user-1"},
+        "postback": {"data": data},
+    }
+
+
+@pytest.mark.asyncio
+async def test_line_postback_becomes_button_interaction():
+    adapter = make_adapter()
+    callback_data = encode_button_callback("approve", {"request_id": 42})
+
+    message = await adapter.convert_message(_postback_event(callback_data))
+
+    assert message is not None
+    assert message.message_id == "event-1"
+    assert message.session_id == "group-1"
+    assert message.message_str == ""
+    assert len(message.message) == 1
+    interaction = message.message[0]
+    assert isinstance(interaction, ButtonInteraction)
+    assert interaction.action_id == "approve"
+    assert interaction.data == {"request_id": 42}
+    assert interaction.interaction_id == "event-1"
+    assert interaction.callback_data == callback_data
+    event = adapter.create_event(message)
+    assert event.get_button_interaction() is interaction
+    assert event.get_postback_data() == callback_data
+
+
+@pytest.mark.asyncio
+async def test_line_native_postback_carries_no_portable_component():
+    adapter = make_adapter()
+
+    message = await adapter.convert_message(_postback_event("third-party=value"))
+
+    assert message is not None
+    assert message.message == []
+    event = adapter.create_event(message)
+    assert event.get_button_interaction() is None
+    assert event.get_postback_data() == "third-party=value"
+
+
+# ------------------------------------------------------------------ 群成员
+
+
+def _chat_event(source: dict) -> dict:
+    event = text_event("e-members")
+    event["source"] = source
+    return event
+
+
+@pytest.mark.asyncio
+async def test_line_get_group_adds_member_count_and_members():
+    adapter = make_adapter()
+    message = await adapter.convert_message(
+        _chat_event({"type": "group", "groupId": "C-group", "userId": "U-sender"})
+    )
+    assert message is not None
+    adapter.line_api.get_chat_member_count = AsyncMock(return_value=2)
+    adapter.line_api.get_chat_member_ids = AsyncMock(return_value=["U-one", "U-two"])
+    adapter.line_api.get_chat_member_profile = AsyncMock(
+        side_effect=[{"userId": "U-one", "displayName": "Alice"}, None]
+    )
+
+    result = await adapter.create_event(message).get_group()
+
+    assert result is not None
+    assert result.group_id == "C-group"
+    assert result.group_name == "Group of C-group"
+    assert result.group_avatar == "https://a/i.png"
+    assert result.member_count == 2
+    assert result.members is not None
+    assert [(member.user_id, member.nickname) for member in result.members] == [
+        ("U-one", "Alice"),
+        ("U-two", None),
+    ]
+    adapter.line_api.get_chat_member_count.assert_awaited_once_with("group", "C-group")
+    # 入站对象不被 get_group 的补充数据改写
+    assert message.group is not None and message.group.member_count is None
+
+
+@pytest.mark.asyncio
+async def test_line_get_room_uses_room_endpoints_without_summary():
+    adapter = make_adapter()
+    adapter.line_api.get_group_summary = AsyncMock()
+    message = await adapter.convert_message(
+        _chat_event({"type": "room", "roomId": "R-room", "userId": "U-sender"})
+    )
+    assert message is not None
+    adapter.line_api.get_chat_member_count = AsyncMock(return_value=3)
+    adapter.line_api.get_chat_member_ids = AsyncMock(return_value=None)
+    adapter.line_api.get_chat_member_profile = AsyncMock()
+    event = adapter.create_event(message)
+
+    result = await event.get_group()
+    other = await event.get_group("R-other")
+
+    assert result is not None
+    assert result.group_id == "R-room"
+    assert result.group_name == "R-room"
+    assert result.member_count == 3
+    assert result.members is None
+    assert other is not None and other.group_name == "R-other"
+    adapter.line_api.get_group_summary.assert_not_awaited()
+    adapter.line_api.get_chat_member_count.assert_any_await("room", "R-room")
+    adapter.line_api.get_chat_member_profile.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_line_get_group_keeps_inbound_data_when_member_apis_fail():
+    adapter = make_adapter()
+    message = await adapter.convert_message(
+        _chat_event({"type": "group", "groupId": "C-group", "userId": "U-sender"})
+    )
+    assert message is not None
+    adapter.line_api.get_chat_member_count = AsyncMock(
+        side_effect=RuntimeError("denied")
+    )
+    adapter.line_api.get_chat_member_ids = AsyncMock(side_effect=RuntimeError("denied"))
+
+    result = await adapter.create_event(message).get_group()
+
+    assert result is not None
+    assert result.group_name == "Group of C-group"
+    assert result.member_count is None
+    assert result.members is None
+
+
+@pytest.mark.asyncio
+async def test_line_member_id_api_follows_pagination_tokens():
+    client = LineAPIClient(channel_access_token="t", channel_secret="s")
+    client._get_json = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[
+            {"memberIds": ["U-one"], "next": "next-page"},
+            {"memberIds": ["U-two", "U-one"]},
+        ]
+    )
+
+    result = await client.get_chat_member_ids("group", "C-group")
+
+    assert result == ["U-one", "U-two"]
+    assert client._get_json.await_count == 2
+    assert client._get_json.await_args_list[0].kwargs["params"] is None
+    assert client._get_json.await_args_list[1].kwargs["params"] == {
+        "start": "next-page"
+    }
+
+
+@pytest.mark.asyncio
+async def test_line_member_id_api_returns_none_when_restricted():
+    client = LineAPIClient(channel_access_token="t", channel_secret="s")
+    client._get_json = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    assert await client.get_chat_member_ids("room", "R-room") is None

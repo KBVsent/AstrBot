@@ -1,0 +1,140 @@
+{
+  "header": {
+    "eyebrow": "ダッシュボード",
+    "title": "システム統計",
+    "subtitle": "プラットフォーム、メッセージ、モデル呼び出しを一元的に表示します。",
+    "notUpdated": "未更新"
+  },
+  "rangeLabels": {
+    "today": "今日"
+  },
+  "overviewCards": {
+    "platformCount": {
+      "label": "プラットフォームインスタンス数",
+      "note": "設定済みで現在稼働中のプラットフォームインスタンス"
+    },
+    "messageCount": {
+      "label": "メッセージ総数",
+      "note": "累計メッセージ数"
+    },
+    "todayModelCalls": {
+      "label": "本日のモデル呼び出し",
+      "note": "トークン"
+    },
+    "cpu": {
+      "label": "CPU",
+      "note": "プログラムの CPU 使用率"
+    },
+    "memory": {
+      "label": "プロセスメモリ",
+      "note": "システムメモリ {systemMemory}"
+    },
+    "uptime": {
+      "label": "稼働時間",
+      "note": "起動時刻 {startTime}"
+    },
+    "distinctUsers": {
+      "label": "ユニークユーザー数",
+      "note": "選択した日にやり取りしたユーザー数"
+    },
+    "distinctUsersGroup": {
+      "label": "グループのユニークユーザー",
+      "note": "グループチャットでやり取りしたユーザー数"
+    },
+    "distinctUsersPrivate": {
+      "label": "個人チャットのユニークユーザー",
+      "note": "個人チャットでやり取りしたユーザー数"
+    },
+    "distinctGroups": {
+      "label": "ユニークグループ数",
+      "note": "選択した日にやり取りしたグループ数"
+    },
+    "previousDayDifference": "前日比 {difference}",
+    "cycleHint": "カードをクリックして集計範囲を切り替え"
+  },
+  "messageOverview": {
+    "title": "メッセージ"
+  },
+  "messageTrend": {
+    "title": "メッセージの推移",
+    "totalMessages": "メッセージ総数"
+  },
+  "platformRanking": {
+    "title": "プラットフォーム別メッセージランキング"
+  },
+  "modelCalls": {
+    "title": "AI モデル"
+  },
+  "modelTrend": {
+    "title": "モデル呼び出しの推移"
+  },
+  "modelTotal": {
+    "title": "{range}のモデル呼び出し合計",
+    "callCount": "合計 {count} 回",
+    "avgTtft": "最初のトークンまでの平均時間（TTFT）",
+    "avgDuration": "平均応答時間",
+    "avgTpm": "平均出力速度（TPM）",
+    "successRate": "呼び出し成功率"
+  },
+  "modelRanking": {
+    "title": "モデル使用量ランキング"
+  },
+  "sessionRanking": {
+    "title": "{range}のセッション別モデル使用量上位 10 件",
+    "openConversation": "会話を見る"
+  },
+  "empty": {
+    "platformStats": "プラットフォーム別メッセージ統計データはありません。",
+    "modelCalls": "{range}のモデル呼び出しデータはありません。",
+    "sessionCalls": "{range}のセッション呼び出しデータはありません。",
+    "commandStats": "コマンド実行の統計データはありません。",
+    "activeUsers": "選択した日のユーザーアクティビティデータはありません。",
+    "activeGroups": "選択した日のグループアクティビティデータはありません。"
+  },
+  "chart": {
+    "messages": "メッセージ",
+    "others": "その他"
+  },
+  "units": {
+    "tokens": "トークン",
+    "tpm": "TPM",
+    "gb": "GB",
+    "mb": "MB",
+    "ms": "ms",
+    "hoursShort": "h",
+    "minutesShort": "m",
+    "secondsShort": "s"
+  },
+  "errors": {
+    "loadFailed": "統計データを読み込めませんでした。しばらくしてからもう一度お試しください。",
+    "rangeFailed": "統計範囲を切り替えられませんでした。しばらくしてからもう一度お試しください。"
+  },
+  "filters": {
+    "date": "日付",
+    "platform": "アダプター",
+    "allPlatforms": "すべてのアダプター"
+  },
+  "commandRanking": {
+    "title": "コマンド使用ランキング",
+    "subtitle": "{range}のコマンド実行回数順",
+    "plugin": "プラグイン",
+    "times": "回",
+    "regex": "正規表現",
+    "total": "計 {count} 件"
+  },
+  "activeUsers": {
+    "title": "{range}のアクティブユーザーランキング",
+    "subtitle": "ボットが処理したメッセージ数順",
+    "total": "計 {count} 人",
+    "tabs": {
+      "all": "すべて",
+      "group": "グループ",
+      "private": "個人チャット"
+    }
+  },
+  "activeGroups": {
+    "title": "{range}のアクティブグループランキング",
+    "subtitle": "ボットが処理したメッセージ数順",
+    "total": "計 {count} 件"
+  }
+}

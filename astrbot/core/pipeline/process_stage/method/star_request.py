@@ -16,7 +16,7 @@ from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 from astrbot.core.utils.stat_recorders import command_stat_recorder
 
 from ...context import PipelineContext, call_event_hook, call_handler
-from ..stage import Stage
+from ...stage import Stage
 
 
 def _resolve_trigger(handler: StarHandlerMetadata) -> tuple[str, str] | None:
@@ -79,17 +79,71 @@ class StarRequestSubStage(Stage):
                     command_name=command_name,
                 )
 
+            # Match the component categories used by the plugin detail page.
+            handler_category = (
+                "command"
+                if any(
+                    isinstance(
+                        event_filter, CommandFilter | CommandGroupFilter | RegexFilter
+                    )
+                    for event_filter in handler.event_filters
+                )
+                else "listener"
+            )
+            event.trace.record(
+                "handler_start",
+                kind="plugin_handler",
+                status="running",
+                plugin=md.name or handler.handler_module_path,
+                plugin_display_name=md.display_name or md.name,
+                handler=handler.handler_name,
+                handler_full_name=handler.handler_full_name,
+                handler_type=handler.event_type.name,
+                handler_category=handler_category,
+                priority=handler.extras_configs.get("priority", 0),
+            )
             try:
                 wrapper = call_handler(event, handler.handler, **params)
                 async for ret in wrapper:
                     yield ret
+                event.trace.record(
+                    "handler_end",
+                    kind="plugin_handler",
+                    status="success",
+                    plugin=md.name or handler.handler_module_path,
+                    plugin_display_name=md.display_name or md.name,
+                    handler=handler.handler_name,
+                    handler_full_name=handler.handler_full_name,
+                    handler_type=handler.event_type.name,
+                    handler_category=handler_category,
+                )
                 if event.is_stopped():
                     break
                 event.clear_result()  # 清除上一个 handler 的结果
             except Exception as e:
                 traceback_text = traceback.format_exc()
-                logger.error(traceback_text)
-                logger.error(f"Star {handler.handler_full_name} handle error: {e}")
+                plugin_name = md.name or handler.handler_module_path
+                # Keep handler failures on the plugin's side of the log filter.
+                logger.error(
+                    traceback_text,
+                    extra={"plugin_name": plugin_name},
+                )
+                logger.error(
+                    f"Star {handler.handler_full_name} handle error: {e}",
+                    extra={"plugin_name": plugin_name},
+                )
+                event.trace.record(
+                    "handler_end",
+                    kind="plugin_handler",
+                    status="error",
+                    plugin=md.name or handler.handler_module_path,
+                    plugin_display_name=md.display_name or md.name,
+                    handler=handler.handler_name,
+                    handler_full_name=handler.handler_full_name,
+                    handler_type=handler.event_type.name,
+                    handler_category=handler_category,
+                    error=str(e),
+                )
 
                 await call_event_hook(
                     event,

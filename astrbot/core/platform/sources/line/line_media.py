@@ -624,7 +624,7 @@ async def _register_reusable_temp_url(path: str) -> str | None:
         token = await file_token_service.register_file(
             str(outbound_path),
             timeout=FALLBACK_URL_TTL_SECONDS,
-            reusable=True,
+            single_use=False,
         )
     except Exception as e:
         logger.warning("[LINE] register fallback media URL failed: %s", e)

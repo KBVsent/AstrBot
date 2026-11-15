@@ -20,8 +20,10 @@ from urllib.parse import quote
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import (
+    ActionRow,
     At,
     BaseMessageComponent,
+    Button,
     File,
     Image,
     Plain,
@@ -31,7 +33,8 @@ from astrbot.api.message_components import (
 )
 from astrbot.core import astrbot_config
 from astrbot.core.platform.astr_message_event import MessageType
-from astrbot.core.platform.astrbot_message import Group
+from astrbot.core.platform.astrbot_message import Group, MessageMember
+from astrbot.core.platform.button_interaction import encode_button_callback
 from astrbot.core.utils.media_utils import MediaResolver
 
 from .components import LineFlex, LineFlexMedia, LineQuickReply, LineRawMessage
@@ -247,6 +250,56 @@ async def _component_to_message_object(
             segment.name or "file",
         )
         return None
+
+    if isinstance(segment, ActionRow):
+        actions: list[dict] = []
+        for button in segment.buttons:
+            label = button.label.strip()[: LineMessageEvent.BUTTON_LABEL_MAX_CHARS]
+            if not label:
+                continue
+
+            if isinstance(button.action, Button.CallbackAction):
+                callback_data = encode_button_callback(
+                    button.id,
+                    button.action.data,
+                    expires_at=segment.action_expires_at,
+                )
+                if (
+                    len(callback_data.encode("utf-8"))
+                    > LineMessageEvent.POSTBACK_DATA_MAX_BYTES
+                ):
+                    raise ValueError("LINE postback data must not exceed 300 bytes.")
+                actions.append(
+                    {
+                        "type": "postback",
+                        "label": label,
+                        "data": callback_data,
+                        "displayText": label,
+                    }
+                )
+            elif isinstance(button.action, Button.UrlAction):
+                actions.append(
+                    {
+                        "type": "uri",
+                        "label": label,
+                        "uri": button.action.url,
+                    }
+                )
+
+        if not actions:
+            return None
+        if len(actions) > LineMessageEvent.BUTTONS_PER_TEMPLATE:
+            raise ValueError("LINE buttons templates support at most 4 actions.")
+        fallback_text = (segment.fallback_text or "").strip() or "Choose an option"
+        return {
+            "type": "template",
+            "altText": fallback_text[:400],
+            "template": {
+                "type": "buttons",
+                "text": fallback_text[:160],
+                "actions": actions,
+            },
+        }
 
     logger.debug("[LINE] unsupported outbound component skipped: %s", segment.type)
     return None
@@ -684,6 +737,10 @@ def _recoverable_components(
 
 
 class LineMessageEvent(AstrMessageEvent):
+    POSTBACK_DATA_MAX_BYTES = 300
+    BUTTON_LABEL_MAX_CHARS = 20
+    BUTTONS_PER_TEMPLATE = 4
+
     def __init__(
         self,
         message_str,
@@ -756,27 +813,78 @@ class LineMessageEvent(AstrMessageEvent):
     # ------------------------------------------------------------ 群聊
 
     async def get_group(self, group_id: str | None = None, **kwargs) -> Group | None:
-        """取群聊数据。LINE 只能给出群名与群头像。
+        """取群聊数据。当前会话的群名与头像复用入站数据，其余现查。
 
-        members / group_owner / group_admins 恒为 None：成员 ID 列表端点仅认证与
-        Premium 账号可用，群主与管理员则是 LINE 里根本不存在的概念。
-
+        members 只有认证与 Premium 账号拿得到，否则为 None；group_owner 与
+        group_admins 恒为 None，LINE 里没有这两个概念。
         多人聊天（room）没有名称，group_name 回落为容器 id。
+
+        Args:
+            group_id: 群或多人聊天 ID，默认当前会话。
+            **kwargs: chat_type 可指定 group 或 room。
         """
         current = str(self.get_group_id() or "")
         target = str(group_id or "").strip() or current
         if not target:
             return None
-        if target == current and self.message_obj.group is not None:
-            # 入站时已按 TTL 缓存填好，无谓再打一次 API。
-            return self.message_obj.group
 
-        summary = await self.line_api.get_group_summary(target) or {}
-        return Group(
-            group_id=target,
-            group_name=summary.get("group_name") or target,
-            group_avatar=summary.get("group_avatar"),
+        chat_type = str(kwargs.get("chat_type", "")).strip().lower()
+        raw = self.message_obj.raw_message
+        source = raw.get("source") if isinstance(raw, dict) else None
+        if chat_type not in {"group", "room"} and isinstance(source, dict):
+            source_id = str(source.get("groupId") or source.get("roomId") or "")
+            source_type = str(source.get("type", ""))
+            if source_id == target and source_type in {"group", "room"}:
+                chat_type = source_type
+        if chat_type not in {"group", "room"}:
+            chat_type = "room" if target.startswith("R") else "group"
+
+        inbound = self.message_obj.group
+        if target == current and inbound is not None:
+            result = Group(
+                group_id=target,
+                group_name=inbound.group_name,
+                group_avatar=inbound.group_avatar,
+            )
+        else:
+            summary = (
+                await self.line_api.get_group_summary(target)
+                if chat_type == "group"
+                else None
+            ) or {}
+            result = Group(
+                group_id=target,
+                group_name=summary.get("group_name") or target,
+                group_avatar=summary.get("group_avatar"),
+            )
+
+        member_count, member_ids = await asyncio.gather(
+            self.line_api.get_chat_member_count(chat_type, target),
+            self.line_api.get_chat_member_ids(chat_type, target),
+            return_exceptions=True,
         )
+        if isinstance(member_count, int) and member_count >= 0:
+            result.member_count = member_count
+        if isinstance(member_ids, list):
+            profiles = await asyncio.gather(
+                *(
+                    self.line_api.get_chat_member_profile(chat_type, target, member_id)
+                    for member_id in member_ids
+                ),
+                return_exceptions=True,
+            )
+            result.members = [
+                MessageMember(
+                    user_id=member_id,
+                    nickname=(
+                        str(profile.get("displayName", "")).strip() or None
+                        if isinstance(profile, dict)
+                        else None
+                    ),
+                )
+                for member_id, profile in zip(member_ids, profiles)
+            ]
+        return result
 
     # ------------------------------------------------------------ 体验
 

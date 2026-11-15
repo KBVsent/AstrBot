@@ -9,6 +9,7 @@ from astrbot.core.platform import (
     PlatformMetadata,
     RawPlatformEvent,
 )
+from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.register import register_platform_adapter
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "AstrMessageEvent",
     "Group",
     "MessageMember",
+    "MessageSession",
     "MessageType",
     "Platform",
     "PlatformMetadata",
