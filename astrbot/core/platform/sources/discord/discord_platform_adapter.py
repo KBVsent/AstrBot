@@ -16,6 +16,7 @@ from astrbot import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import (
     At,
+    BaseMessageComponent,
     ButtonInteraction,
     File,
     Image,
@@ -152,6 +153,8 @@ class DiscordPlatformAdapter(Platform):
         message_obj.self_id = cast(str, self.bot_self_id)
         message_obj.session_id = session.session_id
         message_obj.message = message_chain.chain
+        # 主动发送没有平台原始消息，事件构造时的 get_message_outline 就会读它
+        message_obj.raw_message = None
 
         temp_event = self.create_event(message_obj)
         await temp_event.send(message_chain)
@@ -300,20 +303,39 @@ class DiscordPlatformAdapter(Platform):
             member_count=member_count if isinstance(member_count, int) else None,
         )
 
+    @staticmethod
+    def _content_components(content: str, message: Any) -> list[BaseMessageComponent]:
+        """Split Discord content into text and named mentions in their original order."""
+        names = {
+            str(user.id): user.display_name
+            for user in getattr(message, "mentions", None) or []
+        }
+        components: list[BaseMessageComponent] = []
+        cursor = 0
+        for match in re.finditer(r"<@!?(\d+)>", content):
+            if content[cursor : match.start()].strip():
+                components.append(Plain(text=content[cursor : match.start()]))
+            user_id = match.group(1)
+            components.append(At(qq=user_id, name=names.get(user_id, "")))
+            cursor = match.end()
+        if content[cursor:].strip():
+            components.append(Plain(text=content[cursor:]))
+        return components
+
+    @staticmethod
+    def _attachment_component(attachment: Any) -> BaseMessageComponent:
+        content_type = attachment.content_type or ""
+        if content_type.startswith("image/"):
+            return Image(file=attachment.url, filename=attachment.filename)
+        if content_type.startswith("audio/"):
+            return Record(file=attachment.url, url=attachment.url)
+        return File(name=attachment.filename, url=attachment.url)
+
     def _convert_message_to_abm(self, data: dict) -> AstrBotMessage:
         """将普通消息转换为 AstrBotMessage"""
         message = data["message"]
 
         content = message.content
-
-        # 解析正文里的用户 @：按出现顺序
-        at_components: list[At] = []
-        for match in re.finditer(r"<@!?(\d+)>", content):
-            mid = match.group(1)
-            at_components.append(At(qq=mid))
-
-        # 剥离全部用户 mention 标记（含 bot 与他人），避免雪花 ID 污染位置参数
-        content = re.sub(r"<@!?\d+>", "", content)
 
         # 剥离 Role Mention（bot 拥有的任一角色被提及，<@&role_id>）：角色@仅用于唤醒，不转 At，
         # 仅从文本清理 bot 角色 mention（角色@唤醒，full_message 模式）。
@@ -329,49 +351,22 @@ class DiscordPlatformAdapter(Platform):
                 for role in bot_member.roles:
                     content = content.replace(f"<@&{role.id}>", "")
 
-        # 收敛多余空格
-        content = re.sub(r"\s{2,}", " ", content).strip()
-
         abm = AstrBotMessage()
         abm.type = self._get_message_type(message.channel)
         abm.group_id = self._get_channel_id(message.channel)
         self._attach_group(abm, message.channel)
-        abm.message_str = content
+        # 指令文本不含任何用户 mention，避免雪花 ID 污染位置参数
+        abm.message_str = re.sub(
+            r"\s{2,}", " ", re.sub(r"<@!?\d+>", "", content)
+        ).strip()
         abm.sender = MessageMember(
             user_id=str(message.author.id),
             nickname=message.author.display_name,
         )
-        message_chain = []
-        if abm.message_str:
-            message_chain.append(Plain(text=abm.message_str))
-        message_chain.extend(at_components)
-
-        def _append_attachment(attachment) -> None:
-            if attachment.content_type and attachment.content_type.startswith(
-                "image/",
-            ):
-                message_chain.append(
-                    Image(file=attachment.url, filename=attachment.filename),
-                )
-            elif attachment.content_type and attachment.content_type.startswith(
-                "audio/",
-            ):
-                message_chain.append(
-                    Record(file=attachment.url, url=attachment.url),
-                )
-            else:
-                message_chain.append(
-                    File(name=attachment.filename, url=attachment.url),
-                )
-
-        for attachment in message.attachments:
-            _append_attachment(attachment)
-        # 引用（回复）消息的附件
-        reference = getattr(message, "reference", None)
-        resolved = reference.resolved if reference else None
-        for attachment in getattr(resolved, "attachments", None) or []:
-            _append_attachment(attachment)
-        abm.message = message_chain
+        abm.message = [
+            *self._content_components(content.strip(), message),
+            *(self._attachment_component(item) for item in message.attachments),
+        ]
         abm.raw_message = message
         abm.self_id = cast(str, self.bot_self_id)
         abm.session_id = str(message.channel.id)
@@ -464,12 +459,23 @@ class DiscordPlatformAdapter(Platform):
                 )
         # Deleted references are sentinels without message content.
         if isinstance(quoted, discord.Message):
+            # Quoted attachments stay in the quote; plugins read images from Reply.chain.
+            chain = [
+                *self._content_components(quoted.content, quoted),
+                *(self._attachment_component(item) for item in quoted.attachments),
+            ]
             abm.message.insert(
                 0,
                 Reply(
                     id=str(quoted.id),
-                    chain=[Plain(text=quoted.content)] if quoted.content else [],
-                    message_str=quoted.content,
+                    chain=chain,
+                    message_str="".join(
+                        f"@{part.name or part.qq}"
+                        if isinstance(part, At)
+                        else part.text
+                        for part in chain
+                        if isinstance(part, At | Plain)
+                    ).strip(),
                     sender_id=str(quoted.author.id),
                     sender_nickname=quoted.author.display_name,
                 ),

@@ -93,6 +93,7 @@ async def test_discord_reply_body_reaches_model_request(source):
         content="<@1> TEST_CODE 1008",
         author=SimpleNamespace(id=3, display_name="original sender"),
         attachments=[],
+        mentions=[SimpleNamespace(id=1, display_name="bot")],
     )
     channel = SimpleNamespace(
         id=123, guild=None, fetch_message=AsyncMock(return_value=quoted)
@@ -117,7 +118,7 @@ async def test_discord_reply_body_reaches_model_request(source):
 
     assert req.prompt == "What is the quoted code?"
     quoted_text = "\n".join(part.text for part in req.extra_user_content_parts)
-    assert quoted.content in quoted_text
+    assert "@bot TEST_CODE 1008" in quoted_text
     assert quoted.author.display_name in quoted_text
     reply = next(comp for comp in abm.message if isinstance(comp, Reply))
     assert str(reply.sender_id) == "3"
@@ -125,6 +126,48 @@ async def test_discord_reply_body_reaches_model_request(source):
         channel.fetch_message.assert_awaited_once_with(41)
     else:
         channel.fetch_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_discord_quote_keeps_its_attachments_and_names_mentions():
+    adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
+    adapter.bot_self_id = "1"
+    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    bot = SimpleNamespace(id=1, display_name="Cain-Test")
+    photo = SimpleNamespace(
+        content_type="image/jpeg", filename="a.jpg", url="https://cdn.example/a.jpg"
+    )
+    quoted = Mock(
+        spec=discord.Message,
+        id=41,
+        content="<@1> text and image",
+        author=SimpleNamespace(id=2, display_name="tester"),
+        attachments=[photo],
+        mentions=[bot],
+    )
+    message = SimpleNamespace(
+        id=42,
+        type=discord.MessageType.reply,
+        content="<@1>  haha <@3>",
+        channel=SimpleNamespace(id=123, guild=None),
+        author=SimpleNamespace(id=2, display_name="tester"),
+        attachments=[],
+        mentions=[bot],
+        reference=SimpleNamespace(message_id=41, resolved=quoted),
+    )
+
+    abm = await adapter.convert_message({"message": message})
+
+    reply, *body = abm.message
+    assert isinstance(reply, Reply)
+    assert reply.chain == [
+        At(qq="1", name="Cain-Test"),
+        Plain(text=" text and image"),
+        Image(file=photo.url, filename="a.jpg"),
+    ]
+    assert reply.message_str == "@Cain-Test text and image"
+    assert body == [At(qq="1", name="Cain-Test"), Plain(text="  haha "), At(qq="3")]
+    assert abm.message_str == "haha"
 
 
 @pytest.mark.asyncio
@@ -173,7 +216,7 @@ async def test_discord_unavailable_reply_preserves_current_message(case):
     else:
         abm = await adapter.convert_message({"message": message})
         assert abm.message_str == "Current question"
-        assert abm.message == [Plain(text="Current question"), At(qq="1")]
+        assert abm.message == [At(qq="1"), Plain(text=" Current question")]
     if case in errors:
         channel.fetch_message.assert_awaited_once_with(41)
     else:
