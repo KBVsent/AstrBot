@@ -1,4 +1,5 @@
 from astrbot.core.star.filter.button_action import ButtonActionFilter
+from astrbot.core.star.filter.callback import CallbackFilter
 from astrbot.core.star.filter.custom_filter import CustomFilter
 from astrbot.core.star.filter.event_message_type import (
     EventMessageType,
@@ -13,6 +14,7 @@ from astrbot.core.star.register import register_after_message_sent as after_mess
 from astrbot.core.star.register import (
     register_button_action as button_action,
 )
+from astrbot.core.star.register import register_callback as callback
 from astrbot.core.star.register import register_command as command
 from astrbot.core.star.register import register_command_group as command_group
 from astrbot.core.star.register import register_custom_filter as custom_filter
@@ -49,6 +51,7 @@ from astrbot.core.star.register import register_regex as regex
 __all__ = [
     "CustomFilter",
     "ButtonActionFilter",
+    "CallbackFilter",
     "EventMessageType",
     "EventMessageTypeFilter",
     "PermissionType",
@@ -57,6 +60,7 @@ __all__ = [
     "PlatformAdapterTypeFilter",
     "after_message_sent",
     "button_action",
+    "callback",
     "command",
     "command_group",
     "custom_filter",

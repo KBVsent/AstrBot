@@ -527,17 +527,22 @@ class DiscordPlatformEvent(AstrMessageEvent):
             == discord.InteractionType.application_command
         )
 
-    def is_button_interaction(self) -> bool:
-        """判断是否为按钮交互"""
+    def is_component_interaction(self) -> bool:
+        """判断是否为消息组件交互（按钮 / select）"""
+        raw = getattr(self.message_obj, "raw_message", None)
         return (
-            hasattr(self.message_obj, "raw_message")
-            and hasattr(self.message_obj.raw_message, "type")
-            and cast(discord.Interaction, self.message_obj.raw_message).type
-            == discord.InteractionType.component
+            isinstance(raw, discord.Interaction)
+            and raw.type == discord.InteractionType.component
         )
 
     def is_callback_event(self) -> bool:
-        return self.is_button_interaction()
+        return self.is_component_interaction() or self.is_modal_submit()
+
+    def get_callback_data(self) -> str | None:
+        if not self.is_callback_event():
+            return None
+        raw = cast(discord.Interaction, self.message_obj.raw_message)
+        return str((raw.data or {}).get("custom_id", ""))
 
     def is_user_install_context(self) -> bool:
         """判断当前交互是否为「个人安装(User Install)」上下文。
@@ -560,7 +565,7 @@ class DiscordPlatformEvent(AstrMessageEvent):
         button_interaction = self.get_button_interaction()
         if button_interaction is not None:
             return button_interaction.action_id
-        if self.is_button_interaction():
+        if self.is_component_interaction():
             try:
                 return cast(
                     ComponentInteractionData,

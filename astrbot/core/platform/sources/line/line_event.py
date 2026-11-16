@@ -782,6 +782,9 @@ class LineMessageEvent(AstrMessageEvent):
     def is_callback_event(self) -> bool:
         return self.is_postback()
 
+    def get_callback_data(self) -> str | None:
+        return self.get_postback_data()
+
     def _postback_payload(self) -> dict[str, Any]:
         raw = self.message_obj.raw_message
         if not isinstance(raw, dict):

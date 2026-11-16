@@ -508,7 +508,7 @@ async def test_inbound_mention_offsets_use_utf16():
 
 
 @pytest.mark.asyncio
-async def test_postback_uses_raw_message_and_blocks_default_llm():
+async def test_postback_uses_raw_message():
     adapter = make_adapter()
     event = {
         "type": "postback",
@@ -529,8 +529,7 @@ async def test_postback_uses_raw_message_and_blocks_default_llm():
     assert astr_event.is_postback() is True
     assert astr_event.get_postback_data() == "action=buy&id=1"
     assert astr_event.get_postback_params() == {"date": "2026-08-03"}
-    # 未被插件处理的 postback 不得触发默认 LLM。
-    assert astr_event.call_llm is True
+    assert astr_event.get_callback_data() == "action=buy&id=1"
 
 
 @pytest.mark.asyncio

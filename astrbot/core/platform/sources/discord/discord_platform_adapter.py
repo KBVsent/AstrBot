@@ -529,6 +529,14 @@ class DiscordPlatformAdapter(Platform):
             is_ephemeral=is_ephemeral,
         )
 
+    async def _fallback_defer(self, event: DiscordPlatformEvent) -> None:
+        """回调在管线结束或 2 秒后仍未响应时代为 defer，Discord 的响应窗口是 3 秒。"""
+        try:
+            await asyncio.wait_for(event._pipeline_finished.wait(), timeout=2.0)
+        except asyncio.TimeoutError:
+            pass
+        await event.defer()
+
     async def handle_msg(
         self,
         message: AstrBotMessage,
@@ -557,6 +565,9 @@ class DiscordPlatformAdapter(Platform):
             )
             return
 
+        if message_event.is_callback_event():
+            asyncio.create_task(self._fallback_defer(message_event))
+
         if message_event.is_button_interaction():
             message_event.is_wake = True
             message_event.is_at_or_wake_command = True
@@ -570,9 +581,8 @@ class DiscordPlatformAdapter(Platform):
             self.commit_event(message_event)
             return
 
-        # 2. 组件交互（按钮 / select / modal 提交）：raw_message 是 discord.Interaction。
+        # 2. 原生回调（按钮 / select / modal 提交）：是否唤醒由 WakingCheckStage 按 handler 决定
         if isinstance(message.raw_message, discord.Interaction):
-            message_event.is_wake = True
             self.commit_event(message_event)
             return
 

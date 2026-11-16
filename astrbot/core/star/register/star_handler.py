@@ -16,6 +16,7 @@ from astrbot.core.provider.func_tool_manager import PY_TO_JSON_TYPE, SUPPORTED_T
 from astrbot.core.provider.register import llm_tools
 
 from ..filter.button_action import ButtonActionFilter
+from ..filter.callback import CallbackFilter
 from ..filter.command import CommandFilter
 from ..filter.command_group import CommandGroupFilter
 from ..filter.custom_filter import CustomFilterAnd, CustomFilterOr
@@ -293,6 +294,29 @@ def register_button_action(action_id: str | None = None, **kwargs):
             **kwargs,
         )
         handler_md.event_filters.append(ButtonActionFilter(action_id))
+        return awaitable
+
+    return decorator
+
+
+def register_callback(prefix: str | tuple[str, ...] | None = None, **kwargs):
+    """注册平台原生交互回调的处理器。
+
+    Args:
+        prefix: 回调数据须以它开头，可给多个；None 匹配所有原生回调。
+        **kwargs: 传给通用注册器的 handler 元数据。
+
+    Returns:
+        适配器消息事件处理器的装饰器。
+    """
+
+    def decorator(awaitable):
+        handler_md = get_handler_or_create(
+            awaitable,
+            EventType.AdapterMessageEvent,
+            **kwargs,
+        )
+        handler_md.event_filters.append(CallbackFilter(prefix))
         return awaitable
 
     return decorator

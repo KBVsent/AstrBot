@@ -8,6 +8,7 @@
 - discord_platform_event.py：QQ 兼容 shim 访问器（custom_id / values / modal_values / 类型判定）。
 """
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -345,7 +346,9 @@ def test_event_button_accessors():
         data={"custom_id": "vote:yes", "values": ["a", "b"]},
     )
     ev = _make_event(inter)
-    assert ev.is_button_interaction() is True
+    assert ev.is_component_interaction() is True
+    assert ev.is_callback_event() is True
+    assert ev.get_callback_data() == "vote:yes"
     assert ev.is_modal_submit() is False
     assert ev.get_interaction_custom_id() == "vote:yes"
     assert ev.get_interaction_values() == ["a", "b"]
@@ -362,7 +365,9 @@ def test_event_modal_accessors():
     inter = FakeInteraction(type=discord.InteractionType.modal_submit, data=data)
     ev = _make_event(inter)
     assert ev.is_modal_submit() is True
-    assert ev.is_button_interaction() is False
+    assert ev.is_component_interaction() is False
+    assert ev.is_callback_event() is True
+    assert ev.get_callback_data() == "signup"
     assert ev.get_modal_custom_id() == "signup"
     assert ev.get_modal_values() == {"name": "Alice", "age": "30"}
 
@@ -370,11 +375,25 @@ def test_event_modal_accessors():
 def test_event_accessors_non_interaction_safe():
     """raw_message 非 Interaction（如普通消息）时访问器须安全返回空，不抛异常。"""
     ev = _make_event(object())
-    assert ev.is_button_interaction() is False
+    assert ev.is_callback_event() is False
+    assert ev.get_callback_data() is None
     assert ev.is_modal_submit() is False
     assert ev.get_interaction_values() == []
     assert ev.get_modal_values() == {}
     assert ev.get_modal_custom_id() == ""
+
+
+@pytest.mark.asyncio
+async def test_unanswered_callback_is_deferred_when_pipeline_ends():
+    """没有插件响应的回调由适配器代为 defer，否则 Discord 显示交互失败。"""
+    ev = _make_event(FakeInteraction(type=discord.InteractionType.component))
+    ev._pipeline_finished = asyncio.Event()
+    ev._pipeline_finished.set()
+    ev.defer = AsyncMock()
+
+    await object.__new__(DiscordPlatformAdapter)._fallback_defer(ev)
+
+    ev.defer.assert_awaited_once()
 
 
 def test_event_modal_values_empty_for_non_modal():

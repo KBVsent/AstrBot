@@ -391,8 +391,20 @@ class AstrMessageEvent(abc.ABC):
         self._has_send_oper = True
 
     def is_callback_event(self) -> bool:
-        """本事件是否来自交互回调（按钮点击等），而不是用户主动发的消息"""
-        return False
+        """本事件是否来自交互回调（按钮点击、表单提交等），而不是用户发的消息。
+
+        通用按钮的点击也算回调，is_button_interaction() 为 True 的是其中的通用按钮，
+        其余是平台原生回调。
+        """
+        return self.is_button_interaction()
+
+    def get_callback_data(self) -> str | None:
+        """取回调携带的原始字符串，非回调事件返回 None。
+
+        QQ 官方是按钮 data，Discord 是 custom_id，LINE 是 postback data。
+        """
+        interaction = self.get_button_interaction()
+        return interaction.callback_data if interaction is not None else None
 
     async def send_typing(self) -> None:
         """发送输入中状态。

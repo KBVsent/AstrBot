@@ -12,6 +12,7 @@ from astrbot.core.platform.button_interaction import (
     decode_button_callback,
 )
 from astrbot.core.star.filter.button_action import ButtonActionFilter
+from astrbot.core.star.filter.callback import CallbackFilter
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionTypeFilter
@@ -130,8 +131,10 @@ class WakingCheckStage(Stage):
             self._log_inbound_event(event, important=False)
             return
 
-        # 只认上游的通用按钮点击（消息链里带 ButtonInteraction）。平台原生交互回调
-        # 仍按普通事件走全部 handler，不能用 is_button_interaction() 判断。
+        # 原生回调只凭 CallbackFilter 命中的 handler 唤醒，不走私聊自动唤醒
+        native_callback = (
+            event.is_callback_event() and not event.is_button_interaction()
+        )
         interaction = event.get_button_interaction()
         if isinstance(interaction, ButtonInteraction) and interaction.callback_data:
             try:
@@ -218,7 +221,8 @@ class WakingCheckStage(Stage):
                     break
             # 检查是否是私聊
             if (
-                interaction is None
+                not event.is_button_interaction()
+                and not native_callback
                 and event.is_private_chat()
                 and (
                     not self.friend_message_needs_wake_prefix
@@ -269,8 +273,13 @@ class WakingCheckStage(Stage):
             plugin = star_map.get(handler.handler_module_path)
             if plugin and not plugin.reserved and plugin.name in disabled_plugins:
                 continue
-            if interaction is not None and not any(
+            if event.is_button_interaction() and not any(
                 isinstance(handler_filter, ButtonActionFilter)
+                for handler_filter in handler.event_filters
+            ):
+                continue
+            if native_callback and not any(
+                isinstance(handler_filter, CallbackFilter)
                 for handler_filter in handler.event_filters
             ):
                 continue

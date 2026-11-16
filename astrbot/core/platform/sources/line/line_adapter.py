@@ -936,9 +936,4 @@ class LinePlatformAdapter(Platform):
         if language:
             event.set_extra("user_locale", language)
 
-        if event.is_postback():
-            # 未被插件处理的 postback 不触发默认 LLM（私聊同样成立）。真正的闸门是
-            # process_stage 里的 not event.call_llm；预设 is_wake 之类的标志无效，
-            # 且私聊分支会自行把 is_at_or_wake_command 置真。
-            event.should_call_llm(True)
         self.commit_event(event)

@@ -1131,17 +1131,19 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         except Exception as e:
             logger.warning(f"[QQOfficial] keyboard 补发失败: {e}")
 
-    def is_button_interaction(self) -> bool:
+    def is_callback_event(self) -> bool:
         """当前事件是否来自 QQ 消息按钮点击回调。"""
         raw = getattr(self.message_obj, "raw_message", None)
         return isinstance(raw, botpy.interaction.Interaction)
 
-    def is_callback_event(self) -> bool:
-        return self.is_button_interaction()
+    def get_callback_data(self) -> str | None:
+        if not self.is_callback_event():
+            return None
+        return self.get_interaction_button_data()
 
     def get_message_outline(self) -> str:
         """interaction 事件没有消息链，构造按钮摘要供日志使用。"""
-        if not self.is_button_interaction():
+        if not self.is_callback_event():
             return super().get_message_outline()
         button_id = self.get_interaction_button_id() or "?"
         button_data = self.get_interaction_button_data()
@@ -1151,7 +1153,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
 
     def get_interaction_button_id(self) -> str:
         """获取被点击按钮的 id（`QQCButton.id`）；非交互事件返回空串。"""
-        if not self.is_button_interaction():
+        if not self.is_callback_event():
             return ""
         raw = cast(botpy.interaction.Interaction, self.message_obj.raw_message)
         resolved = getattr(getattr(raw, "data", None), "resolved", None)
@@ -1159,7 +1161,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
 
     def get_interaction_button_data(self) -> str:
         """获取被点击按钮的 data（`QQCButton.data`）；非交互事件返回空串。"""
-        if not self.is_button_interaction():
+        if not self.is_callback_event():
             return ""
         raw = cast(botpy.interaction.Interaction, self.message_obj.raw_message)
         resolved = getattr(getattr(raw, "data", None), "resolved", None)
