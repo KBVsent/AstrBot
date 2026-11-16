@@ -87,7 +87,6 @@ async def test_admin_group_only_blocks_its_own_commands(message, blocked, monkey
     async def return_handlers(_event, handlers):
         return handlers
 
-
     stage = WakingCheckStage()
     stage.ctx = SimpleNamespace(
         astrbot_config={
@@ -114,6 +113,7 @@ async def test_admin_group_only_blocks_its_own_commands(message, blocked, monkey
     event.get_sender_id.return_value = "member-user"
     event.get_messages.return_value = []
     event.is_button_interaction.return_value = False
+    event.get_button_interaction.return_value = None
     event.is_private_chat.return_value = True
     event.get_platform_name.return_value = "aiocqhttp"
     event.get_extra.side_effect = lambda key=None, default=None: default

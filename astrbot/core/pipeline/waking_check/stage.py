@@ -4,6 +4,7 @@ from astrbot import logger
 from astrbot.core import astrbot_config as default_astrbot_config
 from astrbot.core.message.components import At, AtAll, ButtonInteraction, Reply
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
+from astrbot.core.platform.agent_wakeup_event import AgentWakeupEvent
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.button_interaction import (
     BUTTON_ACTION_EXPIRED_MESSAGE,
@@ -171,7 +172,9 @@ class WakingCheckStage(Stage):
         messages = event.get_messages()
         is_wake = event.is_wake
         important_message = False
-        for wake_prefix in [] if is_wake else wake_prefixes:
+        # 适配器已唤醒的事件（Discord @机器人）也要剥前缀，只有 agent 唤醒的 prompt 原样保留
+        skip_prefix = isinstance(event, AgentWakeupEvent)
+        for wake_prefix in [] if skip_prefix else wake_prefixes:
             if message_str.startswith(wake_prefix):
                 if (
                     not event.is_private_chat()
