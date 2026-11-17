@@ -6,15 +6,16 @@ import copy
 import inspect
 import os
 import random
+from collections.abc import AsyncGenerator
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from PIL import Image as PILImage
 
-from astrbot.core.agent.events import ExecutionMetrics, TextDelta
 from astrbot.core.agent.message import (
     ImageURLPart,
     Message,
@@ -207,7 +208,6 @@ def harness(tmp_path, monkeypatch):
         internal, "try_capture_follow_up", lambda event, runtime=None: None
     )
     monkeypatch.setattr(native_session, "record_agent_stats", AsyncMock())
-    monkeypatch.setattr(native_session.Metric, "upload", AsyncMock())
     monkeypatch.setattr(
         knowledge_base_build, "retrieve_knowledge_base", AsyncMock(return_value=None)
     )
@@ -244,7 +244,7 @@ async def process_event(harness, event, *, preprocess_first=False, stage=None):
     stage = stage or ProcessStage()
     if not hasattr(stage, "ctx"):
         await stage.initialize(harness.ctx)
-    async for _ in stage.process(event):
+    async for _ in cast(AsyncGenerator[None, None], stage.process(event)):
         result = event.get_result()
         if result and result.async_stream:
             async for _ in result.async_stream:
@@ -274,9 +274,9 @@ async def test_legacy_toggle_does_not_disable_preparation(
         assert image.format == expected
         assert image.size == ((90, 45) if fmt == "GIF" else (60, 30))
         if fmt == "PNG":
-            assert image.getpixel((0, 0))[3] == 128
+            assert cast(tuple, image.getpixel((0, 0)))[3] == 128
     assert source.read_bytes() == original
-    assert Path(event.get_messages()[0].file).read_bytes() == original
+    assert Path(cast(Any, event.get_messages()[0]).file).read_bytes() == original
     assert str(source) not in event._temporary_local_files
     assert any(
         str(source) in p.text
@@ -457,7 +457,7 @@ async def test_profile_reload_and_concurrent_requests(harness, tmp_path):
         agent_runtimes=harness.ctx.agent_runtimes,
     )
     other_stage = ProcessStage()
-    await other_stage.initialize(other_ctx)
+    await other_stage.initialize(cast(Any, other_ctx))
     harness.config["provider_settings"]["image_compress_options"]["max_size"] = 30
     await stage.initialize(harness.ctx)
     await asyncio.gather(
@@ -508,12 +508,6 @@ async def test_subagent_config_does_not_remove_main_tools(harness):
         (True, False, "tool_b", "Router shared"),
         (False, False, "tool_b", "Router disabled"),
     ]:
-        config = {
-            "main_enable": enabled,
-            "remove_main_duplicate_tools": dedupe,
-            "router_system_prompt": router,
-            "agents": [{"name": "worker", "tools": [assigned]}],
-        }
         harness.config["agent"]["config"]["subagents"] = {
             "enabled": enabled,
             "config_ids": [],
@@ -571,10 +565,13 @@ async def test_subagents_use_session_profile_without_global_override(
     )
     stage = ProcessStage()
     await stage.initialize(
-        SimpleNamespace(
-            astrbot_config=session_config,
-            plugin_manager=harness.ctx.plugin_manager,
-            agent_runtimes=harness.ctx.agent_runtimes,
+        cast(
+            Any,
+            SimpleNamespace(
+                astrbot_config=session_config,
+                plugin_manager=harness.ctx.plugin_manager,
+                agent_runtimes=harness.ctx.agent_runtimes,
+            ),
         )
     )
 
@@ -625,12 +622,9 @@ async def test_plugin_request_extra_metadata_hook_and_history(
     original = ProviderRequest(
         prompt="plugin",
         image_urls=[str(source)],
-        extra_user_content_parts=[
-            TextPart(text="first"),
-            extra,
-            detail,
-            TextPart(text="last"),
-        ],
+        extra_user_content_parts=cast(
+            Any, [TextPart(text="first"), extra, detail, TextPart(text="last")]
+        ),
         contexts=historical,
     )
     event = make_event()
@@ -914,7 +908,7 @@ async def test_unresolved_image_ref_is_reported_not_faked(harness, origin):
     assert "local media path" not in joined
     if origin == "component":
         # The component keeps its own reference instead of a fabricated path.
-        assert event.message_obj.message[0].file == ref
+        assert cast(Image, event.message_obj.message[0]).file == ref
         assert "[Image unavailable]" in joined
     else:
         assert "unresolved media ref" in joined
@@ -934,7 +928,7 @@ async def test_oversized_images_explain_omission_and_keep_original_path(
     refs = [str(source)]
     if with_valid_image:
         refs.append(str(source_image(tmp_path, "JPEG")))
-    attachments = [Image(file=ref) for ref in refs]
+    attachments: list[Any] = [Image(file=ref) for ref in refs]
     event = make_event(text="describe")
     if origin == "ordinary":
         event.message_obj.message = attachments
@@ -1005,7 +999,7 @@ async def test_oversized_plugin_download_is_retained_for_file_tool(
     PILImage.new("RGB", (4, 4)).save(source)
     original = source.read_bytes()
 
-    async def download(url, target):
+    async def download(url, target, max_bytes=None):
         path = Path(target)
         path.write_bytes(original)
         with path.open("ab") as file:
@@ -1121,7 +1115,7 @@ async def test_localized_reference_lifetime_and_ownership(
         "file": source.as_uri(),
     }
 
-    async def download(url, target):
+    async def download(url, target, max_bytes=None):
         Path(target).write_bytes(source.read_bytes())
 
     monkeypatch.setattr(media, "download_file", download)
@@ -1159,7 +1153,7 @@ async def test_compliant_plugin_images_reuse_localized_file_with_correct_ownersh
         "path": str(source),
     }
 
-    async def download(url, target):
+    async def download(url, target, max_bytes=None):
         Path(target).write_bytes(original)
 
     monkeypatch.setattr(media, "download_file", download)
@@ -1288,7 +1282,8 @@ async def test_plugin_and_hook_image_list_normalization(harness, tmp_path, monke
     source = source_image(tmp_path)
     event = make_event()
     original = ProviderRequest(
-        prompt="plugin", image_urls=[None, "", "  " + str(source) + "  ", str(source)]
+        prompt="plugin",
+        image_urls=cast(Any, [None, "", "  " + str(source) + "  ", str(source)]),
     )
     event.set_extra("provider_request", original)
 
@@ -1303,7 +1298,9 @@ async def test_plugin_and_hook_image_list_normalization(harness, tmp_path, monke
     assert len(harness.captured[0].req.image_urls) == 1
     assert original.image_urls[0] is None and original.image_urls[2].startswith("  ")
     empty = make_event(session="empty-plugin")
-    empty.set_extra("provider_request", ProviderRequest(prompt="text", image_urls=None))
+    empty.set_extra(
+        "provider_request", ProviderRequest(prompt="text", image_urls=cast(Any, None))
+    )
     await process_event(harness, empty)
     assert harness.captured[-1].req.image_urls == []
 
@@ -1338,7 +1335,7 @@ async def test_attachment_sources_survive_event_cleanup(
     harness.config["provider_settings"]["image_compress_enabled"] = enabled
     harness.config["provider_settings"]["image_compress_options"]["max_size"] = 12
 
-    async def download(url, target):
+    async def download(url, target, max_bytes=None):
         Path(target).write_bytes(original)
 
     async def hook(event, kind, *args, context_observer=None):
@@ -1409,7 +1406,7 @@ async def test_stage_failure_preserves_sources_and_cleans_working_files(
         else nullcontext()
     )
     with expectation:
-        async for _ in stage.process(event):
+        async for _ in cast(AsyncGenerator[None, None], stage.process(event)):
             pass
     owned = [Path(path) for path in event._temporary_local_files]
     assert len(owned) == 1 and owned[0].is_file()
@@ -1486,7 +1483,11 @@ async def test_materialized_sources_remain_owned_when_collection_fails(
         failing_image.convert_to_file_path = AsyncMock(
             side_effect=failure("unavailable")
         )
-        chain = event.message_obj.message[0].chain if quoted else event.get_messages()
+        chain = (
+            cast(Any, event.message_obj.message[0]).chain
+            if quoted
+            else event.get_messages()
+        )
         chain.append(failing_image)
     else:
         monkeypatch.setattr(
@@ -1821,7 +1822,7 @@ async def test_plugin_image_notices_are_not_parsed(
     req = ProviderRequest(
         prompt="Use these references if needed",
         image_urls=[str(source)] if with_image else [],
-        extra_user_content_parts=list(plugin_parts),
+        extra_user_content_parts=cast(Any, list(plugin_parts)),
     )
     prepared = {}
     convert = AsyncMock(wraps=image_input.prepare_model_image)

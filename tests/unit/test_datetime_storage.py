@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from sqlalchemy import Column, DateTime, MetaData, create_engine, literal, select
@@ -50,12 +51,17 @@ def test_datetime_columns_preserve_wall_time(
         or isinstance(getattr(column.type, "impl", None), DateTime)
     ]
     assert columns
-    expected = value.replace(tzinfo=None) if value is not None else None
+    # Hourly stat buckets are stored to the second so ORM filters bind the same
+    # text that the raw-SQL upserts write.
+    second_precision = {"platform_stats.timestamp", "command_stats.timestamp"}
     engine = create_engine("sqlite://")
     try:
         with engine.connect() as connection:
             for column in columns:
                 # SQLite historically stores the wall time without an offset.
+                expected = value.replace(tzinfo=None) if value is not None else None
+                if expected is not None and str(column) in second_precision:
+                    expected = expected.replace(microsecond=0)
                 result = connection.scalar(select(literal(value, type_=column.type)))
                 assert result == expected, str(column)
     finally:
@@ -65,10 +71,10 @@ def test_datetime_columns_preserve_wall_time(
 @pytest.mark.parametrize(
     "column",
     [
-        PlatformStat.__table__.c.timestamp,
-        ConversationV2.__table__.c.created_at,
-        KnowledgeBase.__table__.c.created_at,
-        Document.__table__.c.created_at,
+        cast(Any, PlatformStat).__table__.c.timestamp,
+        cast(Any, ConversationV2).__table__.c.created_at,
+        cast(Any, KnowledgeBase).__table__.c.created_at,
+        cast(Any, Document).__table__.c.created_at,
     ],
     ids=["statistics", "inherited-timestamp", "knowledge-base", "documents"],
 )

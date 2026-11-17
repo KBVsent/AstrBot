@@ -4,15 +4,28 @@ AstrBot 测试配置
 提供共享的 pytest fixtures 和测试工具。
 """
 
+import asyncio
 import json
 import os
+import shutil
 import sys
+import tempfile
 from asyncio import Queue
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+
+# astrbot.core 在首次 import 时按 ASTRBOT_ROOT 建全局 db_helper 和配置，
+# 所以必须在任何 astrbot 模块加载前把根目录换成临时目录，且无视外部传入的值。
+if any(name == "astrbot" or name.startswith("astrbot.") for name in sys.modules):
+    raise RuntimeError(
+        "astrbot was imported before tests/conftest.py isolated ASTRBOT_ROOT"
+    )
+TEST_ASTRBOT_ROOT = Path(tempfile.mkdtemp(prefix="astrbot-tests-")).resolve()
+(TEST_ASTRBOT_ROOT / "data").mkdir()
+os.environ["ASTRBOT_ROOT"] = str(TEST_ASTRBOT_ROOT)
 
 # 使用 tests/fixtures/helpers.py 中的共享工具函数，避免重复定义
 
@@ -97,6 +110,14 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "db: 数据库相关测试")
     config.addinivalue_line("markers", "tier_c: C-tier tests (optional / non-blocking)")
     config.addinivalue_line("markers", "tier_d: D-tier tests (extended / integration)")
+
+
+def pytest_unconfigure(config):  # noqa: ARG001
+    core = sys.modules.get("astrbot.core")
+    if core is not None:
+        # aiosqlite 的连接线程不是 daemon，全局引擎池里留下的连接会让进程退出时一直等待。
+        asyncio.run(core.db_helper.engine.dispose())
+    shutil.rmtree(TEST_ASTRBOT_ROOT, ignore_errors=True)
 
 
 # ============================================================
