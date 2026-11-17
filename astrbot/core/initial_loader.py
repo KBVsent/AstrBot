@@ -7,7 +7,10 @@
 
 import asyncio
 import contextlib
+import signal
 import traceback
+from collections.abc import Callable
+from functools import partial
 
 from astrbot.core import LogBroker, logger
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
@@ -51,10 +54,49 @@ class InitialLoader:
             # 启动核心任务和仪表板服务器
             task = asyncio.gather(core_task, asyncio.shield(dashboard_task))
         else:
-            task = core_task
+            task = asyncio.ensure_future(core_task)
+
+        stopping = False
+
+        def request_shutdown(signame: str) -> None:
+            # 关闭只走一次：后续信号不能打断正在进行的 stop()
+            nonlocal stopping
+            if stopping:
+                logger.info(f"Received {signame}; shutdown is already in progress.")
+                return
+            stopping = True
+            logger.info(f"Received {signame}.")
+            task.cancel()
+
+        loop = asyncio.get_running_loop()
+
+        def notify(signum: int, _frame: object) -> None:
+            loop.call_soon_threadsafe(request_shutdown, signal.Signals(signum).name)
+
+        restores: list[Callable[[], object]] = []
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous = signal.getsignal(sig)
+            try:
+                loop.add_signal_handler(sig, request_shutdown, sig.name)
+            except NotImplementedError:
+                # Windows event loops have no add_signal_handler.
+                try:
+                    signal.signal(sig, notify)
+                except (OSError, ValueError) as exc:
+                    logger.warning(f"Cannot handle {sig.name} for shutdown: {exc}")
+                    continue
+            except RuntimeError as exc:
+                logger.warning(f"Cannot handle {sig.name} for shutdown: {exc}")
+                continue
+            else:
+                restores.append(partial(loop.remove_signal_handler, sig))
+            if previous is not None:
+                restores.append(partial(signal.signal, sig, previous))
+
         try:
             await task  # 整个AstrBot在这里运行
         except asyncio.CancelledError:
+            stopping = True
             logger.info("🌈 Shutting down AstrBot...")
             if dashboard_task:
                 # 先触发 dashboard 优雅退出并等待其正常结束
@@ -62,3 +104,7 @@ class InitialLoader:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await dashboard_task
             await core_lifecycle.stop()
+            logger.info("AstrBot stopped.")
+        finally:
+            for undo in restores:
+                undo()
