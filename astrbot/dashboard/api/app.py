@@ -42,6 +42,7 @@ from astrbot.dashboard.services.session_management_service import (
     SessionManagementService,
 )
 from astrbot.dashboard.services.skills_service import SkillsService
+from astrbot.dashboard.services.sns_service import SnsService
 from astrbot.dashboard.services.stat_service import StatService
 from astrbot.dashboard.services.t2i_service import T2iService
 from astrbot.dashboard.services.tools_service import ToolsService
@@ -143,6 +144,7 @@ def create_dashboard_asgi_app(
         open_api=OpenApiService(db, core_lifecycle),
         sessions=SessionManagementService(core_lifecycle, db),
         skills=SkillsService(core_lifecycle),
+        sns=SnsService(db, core_lifecycle),
         stats=stats,
         agent_configs=AgentConfigService(
             core_lifecycle.agent_configs,

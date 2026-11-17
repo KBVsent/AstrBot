@@ -583,6 +583,9 @@ async def migra(
     """
     from astrbot.core.db.migration.migra_45_to_46 import migrate_45_to_46
     from astrbot.core.db.migration.migra_agent_configs import migrate_agent_configs
+    from astrbot.core.db.migration.migra_platform_stats_instances import (
+        migrate_platform_stats_instances,
+    )
     from astrbot.core.db.migration.migra_token_usage import migrate_token_usage
     from astrbot.core.db.migration.migra_webchat_session import (
         migrate_webchat_session,
@@ -606,6 +609,12 @@ async def migra(
         await migrate_token_usage(db)
     except Exception as exc:
         logger.error("Migration for token_usage column failed: %s", exc)
+        logger.error(traceback.format_exc())
+
+    try:
+        await migrate_platform_stats_instances(db, acm.default_conf.get("platform", []))
+    except Exception as exc:
+        logger.error("Migration for platform_stats instances failed: %s", exc)
         logger.error(traceback.format_exc())
 
     configs = list(acm.confs.values())

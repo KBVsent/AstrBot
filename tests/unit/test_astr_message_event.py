@@ -88,14 +88,11 @@ def astr_message_event(platform_meta, astrbot_message):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_response", [False, True])
 async def test_streaming_trace_only_records_final_response(
-    astr_message_event, monkeypatch, tool_response
+    astr_message_event, tool_response
 ):
     """Aggregate adapter chunks without hiding independent tool responses."""
     event = astr_message_event
     event.trace = MagicMock()
-    monkeypatch.setattr(
-        "astrbot.core.platform.astr_message_event.Metric.upload", AsyncMock()
-    )
 
     async def stream():
         yield MessageChain([Plain("Hello")])
@@ -209,9 +206,6 @@ async def test_response_trace_omits_sending_owner(
     """Record delivered responses without attributing a sending owner."""
     event = astr_message_event
     event.trace = MagicMock()
-    monkeypatch.setattr(
-        "astrbot.core.platform.astr_message_event.Metric.upload", AsyncMock()
-    )
     monkeypatch.setattr(
         "astrbot.core.pipeline.respond.stage.call_event_hook",
         AsyncMock(return_value=False),
@@ -333,14 +327,11 @@ async def test_public_context_send_skips_unscoped_and_stream_chunk_records(
 
 
 @pytest.mark.asyncio
-async def test_nested_event_forwarding_records_delivery_once(monkeypatch):
+async def test_nested_event_forwarding_records_delivery_once():
     """Record nested public sends only once without duplicating event metrics."""
     from astrbot.core.platform.agent_wakeup_event import AgentWakeupEvent
     from astrbot.core.platform.message_session import MessageSession
 
-    monkeypatch.setattr(
-        "astrbot.core.platform.astr_message_event.Metric.upload", AsyncMock()
-    )
     context = SimpleNamespace(
         platform_manager=SimpleNamespace(
             platform_insts=[
@@ -974,11 +965,7 @@ class TestSendStreaming:
         async def generator():
             yield MessageEventResult().message("Test")
 
-        with patch(
-            "astrbot.core.platform.astr_message_event.Metric.upload",
-            new_callable=AsyncMock,
-        ):
-            await astr_message_event.send_streaming(generator())
+        await astr_message_event.send_streaming(generator())
 
         assert astr_message_event._has_send_oper is True
 

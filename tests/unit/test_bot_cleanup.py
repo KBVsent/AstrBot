@@ -13,6 +13,8 @@ from astrbot.core.cron.manager import CronJobManager
 from astrbot.core.db.po import (
     ConversationV3,
     CronJob,
+    ImMessage,
+    ImSession,
     PlatformMessageHistory,
     PlatformStat,
     ProviderStat,
@@ -82,6 +84,10 @@ async def test_cleanup_is_selective_and_matches_exact_platform(
                     ),
                     UmoAlias(umo=umo, creator_sender_id="sender", user_alias="Room"),
                     UmoSender(umo=umo, sender_id="sender", sender_name="Alice"),
+                    ImSession(
+                        umo=umo, platform_id=platform, message_type="GroupMessage"
+                    ),
+                    ImMessage(umo=umo, direction="in"),
                     PlatformStat(
                         platform_id=platform,
                         platform_type="test",
@@ -98,7 +104,9 @@ async def test_cleanup_is_selective_and_matches_exact_platform(
                 ]
             )
             await preferences.session_put(
-                umo, "config_binding", {"profile_id": None, "overrides": {"provider_settings.enable": False}}
+                umo,
+                "config_binding",
+                {"profile_id": None, "overrides": {"provider_settings.enable": False}},
             )
             await preferences.session_put(umo, "session_variables", {"name": platform})
             await preferences.session_put(umo, "sel_conv_id", platform)
@@ -134,7 +142,9 @@ async def test_cleanup_is_selective_and_matches_exact_platform(
                 (PlatformMessageHistory, "message_history", "platform_id"),
                 (UmoAlias, "message_history", "umo"),
                 (UmoSender, "message_history", "umo"),
-                (PlatformStat, "shared_platform_totals", "platform_id"),
+                (ImSession, "message_history", "umo"),
+                (ImMessage, "message_history", "umo"),
+                (PlatformStat, "stats", "platform_id"),
                 (ProviderStat, "stats", "umo"),
                 (CronJob, "cron_jobs", "job_id"),
             ]:
@@ -147,7 +157,12 @@ async def test_cleanup_is_selective_and_matches_exact_platform(
             rules_removed = selected and "custom_rules" in targets
             prefs_removed = selected and "preferences" in targets
             assert await preferences.session_get(umo, "config_binding") == (
-                None if rules_removed else {"profile_id": None, "overrides": {"provider_settings.enable": False}}
+                None
+                if rules_removed
+                else {
+                    "profile_id": None,
+                    "overrides": {"provider_settings.enable": False},
+                }
             )
             assert await preferences.session_get(umo, "session_variables") == (
                 None if prefs_removed else {"name": platform}

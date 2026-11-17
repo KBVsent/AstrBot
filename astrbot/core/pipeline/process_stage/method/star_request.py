@@ -1,5 +1,6 @@
 """本地 Agent 模式的 AstrBot 插件调用 Stage"""
 
+import re
 import traceback
 from collections.abc import AsyncGenerator
 from datetime import datetime
@@ -36,6 +37,62 @@ def _resolve_trigger(handler: StarHandlerMetadata) -> tuple[str, str] | None:
     return regex_trigger
 
 
+def _command_args(handler: StarHandlerMetadata, message_str: str) -> str:
+    """Return the text after the longest command name or alias the message starts with.
+
+    message_str has its wake prefix stripped already; when no name matches (a
+    handler before this one rewrote it), the whole text is returned.
+    """
+    text = re.sub(r"\s+", " ", (message_str or "").strip())
+    for event_filter in handler.event_filters:
+        if isinstance(event_filter, (CommandFilter, CommandGroupFilter)):
+            for name in sorted(
+                event_filter.get_complete_command_names(), key=len, reverse=True
+            ):
+                if text == name or text.startswith(f"{name} "):
+                    return text[len(name) :].strip()
+            break
+    return text
+
+
+def _log_trigger(
+    event: AstrMessageEvent,
+    handler: StarHandlerMetadata,
+    plugin_name: str,
+    command_name: str,
+    trigger_type: str,
+) -> None:
+    """Log the command or regex handler about to run.
+
+    Regex handlers log only their function name, since their patterns may
+    match secrets such as tokens.
+    """
+    if event.is_private_chat():
+        chat_tag = "[私聊]"
+    else:
+        group_id = event.get_group_id() or "unknown"
+        group = getattr(event.message_obj, "group", None)
+        group_name = getattr(group, "group_name", None) if group else None
+        if group_name and str(group_name) not in {"", "N/A"}:
+            chat_tag = f"[群聊 {group_name}({group_id})]"
+        else:
+            chat_tag = f"[群聊 ({group_id})]"
+    sender_name = event.get_sender_name()
+    sender_id = event.get_sender_id()
+    sender = f"{sender_name}/{sender_id}" if sender_name else sender_id
+    if trigger_type == "regex":
+        action = command_name
+    else:
+        action = f"/{command_name} {_command_args(handler, event.get_message_str())}"
+    conf_name = event.get_extra("_inbound_log_conf_name", "unknown")
+    # category lets the WebUI log page hide user chat.
+    logger.info(
+        f"[{conf_name}] [{event.get_platform_id()}({event.get_platform_name()})] "
+        f"{chat_tag} {sender} -> {action.rstrip()} ({plugin_name})",
+        extra={"category": "user_chat"},
+    )
+
+
 class StarRequestSubStage(Stage):
     async def initialize(self, ctx: PipelineContext) -> None:
         self.prompt_prefix = ctx.astrbot_config["provider_settings"]["prompt_prefix"]
@@ -65,12 +122,11 @@ class StarRequestSubStage(Stage):
                     f"Cannot find plugin for given handler module path: {handler.handler_module_path}",
                 )
                 continue
-            logger.debug(f"plugin -> {md.name} - {handler.handler_name}")
-
-            # 统计指令 / 正则处理器触发次数（合并进内存聚合器，周期批量落库）
+            # 指令 / 正则处理器：打日志并计入触发统计（内存聚合，周期批量落库）
             trigger = _resolve_trigger(handler)
             if trigger:
                 command_name, trigger_type = trigger
+                _log_trigger(event, handler, md.name or "", command_name, trigger_type)
                 command_stat_recorder.record(
                     timestamp=datetime.now().replace(minute=0, second=0, microsecond=0),
                     platform_id=event.get_platform_id(),

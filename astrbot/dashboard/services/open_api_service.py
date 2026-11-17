@@ -57,7 +57,6 @@ class OpenApiService:
     ) -> None:
         self.db = db
         self.core_lifecycle = core_lifecycle
-        self.platform_manager = core_lifecycle.platform_manager
         self.platform_history_mgr = getattr(
             core_lifecycle,
             "platform_message_history_manager",
@@ -659,22 +658,12 @@ class OpenApiService:
             raise OpenApiServiceError(f"Invalid umo: {exc}") from exc
 
         platform_id = session.platform_name
-        platform_inst = next(
-            (
-                inst
-                for inst in self.platform_manager.platform_insts
-                if inst.meta().id == platform_id
-            ),
-            None,
-        )
-        if not platform_inst:
-            raise OpenApiServiceError(
-                f"Bot not found or not running for platform: {platform_id}"
-            )
-
         try:
             message_chain = await self.build_message_chain_from_payload(message_payload)
-            await platform_inst.send_by_session(session, message_chain)
+            # Context.send_message is the send path the SNS client records.
+            sent = await self.core_lifecycle.star_context.send_message(
+                session, message_chain
+            )
         except OpenApiServiceError:
             raise
         except ValueError as exc:
@@ -682,6 +671,10 @@ class OpenApiService:
         except Exception as exc:
             logger.error(f"Open API send_message failed: {exc}", exc_info=True)
             raise OpenApiServiceError(f"Failed to send message: {exc}") from exc
+        if not sent:
+            raise OpenApiServiceError(
+                f"Bot not found or not running for platform: {platform_id}"
+            )
 
     def get_bots(self) -> dict:
         bot_ids = []

@@ -1,7 +1,6 @@
 from collections.abc import AsyncGenerator
 
 from astrbot import logger
-from astrbot.core import astrbot_config as default_astrbot_config
 from astrbot.core.message.components import At, AtAll, ButtonInteraction, Reply
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 from astrbot.core.platform.agent_wakeup_event import AgentWakeupEvent
@@ -13,10 +12,8 @@ from astrbot.core.platform.button_interaction import (
 )
 from astrbot.core.star.filter.button_action import ButtonActionFilter
 from astrbot.core.star.filter.callback import CallbackFilter
-from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.permission import PermissionTypeFilter
-from astrbot.core.star.filter.regex import RegexFilter
 from astrbot.core.star.star import star_map
 from astrbot.core.star.star_handler import EventType, star_handlers_registry
 from astrbot.core.utils.session_waiter import FILTERS, USER_SESSIONS
@@ -70,54 +67,6 @@ class WakingCheckStage(Stage):
             ctx.astrbot_config_id,
         )
 
-    def _log_inbound_event(
-        self,
-        event: AstrMessageEvent,
-        important: bool,
-    ) -> None:
-        """按重要程度记录入站消息。
-
-        Args:
-            event: 当前消息事件。
-            important: 消息是否由显式唤醒或指令过滤器触发。
-        """
-        conf_name = event.get_extra("_inbound_log_conf_name", "unknown")
-        if event.is_private_chat():
-            chat_tag = "[私聊]"
-        else:
-            group_id = event.get_group_id() or "unknown"
-            group = getattr(event.message_obj, "group", None)
-            group_name = getattr(group, "group_name", None) if group else None
-            if group_name and str(group_name) not in {"", "N/A"}:
-                chat_tag = f"[群聊 {group_name}({group_id})]"
-            else:
-                chat_tag = f"[群聊 ({group_id})]"
-
-        if event.get_sender_name():
-            message = (
-                f"[{conf_name}] "
-                f"[{event.get_platform_id()}({event.get_platform_name()})] "
-                f"{chat_tag} "
-                f"{event.get_sender_name()}/{event.get_sender_id()}: "
-                f"{event.get_message_outline()}"
-            )
-        else:
-            message = (
-                f"[{conf_name}] "
-                f"[{event.get_platform_id()}({event.get_platform_name()})] "
-                f"{chat_tag} "
-                f"{event.get_sender_id()}: {event.get_message_outline()}"
-            )
-
-        # inbound_message_log 属于进程级设置，固定读默认配置档（与 log_level 一致），
-        # 避免消息按会话路由到独立 abconf 档时读到各档的旧默认值而漏配。
-        log_mode = default_astrbot_config.get("inbound_message_log", "wake_only")
-        # category 供 WebUI 日志页的「排除用户对话」开关过滤，两个分支都要带。
-        if important or log_mode == "all":
-            logger.info(message, extra={"category": "user_chat"})
-        else:
-            logger.debug(message, extra={"category": "user_chat"})
-
     async def process(
         self,
         event: AstrMessageEvent,
@@ -128,7 +77,6 @@ class WakingCheckStage(Stage):
             and event.get_self_id() == event.get_sender_id()
         ):
             event.stop_event()
-            self._log_inbound_event(event, important=False)
             return
 
         # 原生回调只凭 CallbackFilter 命中的 handler 唤醒，不走私聊自动唤醒
@@ -174,7 +122,6 @@ class WakingCheckStage(Stage):
         wake_prefixes = effective_config["wake_prefix"]
         messages = event.get_messages()
         is_wake = event.is_wake
-        important_message = False
         # 适配器已唤醒的事件（Discord @机器人）也要剥前缀，只有 agent 唤醒的 prompt 原样保留
         skip_prefix = isinstance(event, AgentWakeupEvent)
         for wake_prefix in [] if skip_prefix else wake_prefixes:
@@ -197,7 +144,6 @@ class WakingCheckStage(Stage):
                         ]
                 else:
                     event.message_str = message_str[len(wake_prefix) :].strip()
-                important_message = True
                 break
         if not is_wake:
             # 检查是否有at消息 / at全体成员消息 / 引用了bot的消息
@@ -217,7 +163,6 @@ class WakingCheckStage(Stage):
                     event.is_wake = True
                     wake_prefix = ""
                     event.is_at_or_wake_command = True
-                    important_message = True
                     break
             # 检查是否是私聊
             if (
@@ -294,7 +239,6 @@ class WakingCheckStage(Stage):
             passed = True
             permission_not_pass = False
             permission_filter_raise_error = False
-            important_filter_matched = False
             if len(handler.event_filters) == 0:
                 continue
 
@@ -308,14 +252,7 @@ class WakingCheckStage(Stage):
                         if not filter.filter(event, effective_config):
                             passed = False
                             break
-                        if isinstance(
-                            filter,
-                            CommandFilter | CommandGroupFilter | RegexFilter,
-                        ):
-                            important_filter_matched = True
                 except Exception as e:
-                    if isinstance(filter, CommandFilter | CommandGroupFilter):
-                        important_message = True
                     await event.send(
                         MessageEventResult()
                         .message(
@@ -327,7 +264,6 @@ class WakingCheckStage(Stage):
                     passed = False
                     break
             if passed:
-                important_message = important_message or important_filter_matched
                 if permission_not_pass:
                     if not permission_filter_raise_error:
                         # 跳过
@@ -343,7 +279,6 @@ class WakingCheckStage(Stage):
                         f"{star_map[handler.handler_module_path].name}.",
                     )
                     event.stop_event()
-                    self._log_inbound_event(event, important=important_message)
                     if event.is_wake:
                         self._umo_auto_name_recorder.schedule(event)
                     return
@@ -368,7 +303,6 @@ class WakingCheckStage(Stage):
         event.set_extra("activated_handlers", activated_handlers)
         event.set_extra("handlers_parsed_params", handlers_parsed_params)
 
-        self._log_inbound_event(event, important=important_message)
         # Admit follow-up input without invoking callbacks before access checks.
         if not is_wake:
             for session_filter in tuple(FILTERS):

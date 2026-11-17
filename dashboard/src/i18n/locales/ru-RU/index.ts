@@ -33,6 +33,7 @@ import ruRUCommand from './features/command.json';
 import ruRUSubagent from './features/subagent.json';
 import ruRUWelcome from './features/welcome.json';
 import ruRUDiscordRegistry from './features/discord-registry.json';
+import ruRUIm from './features/im.json';
 import ruRUErrors from './messages/errors.json';
 import ruRUSuccess from './messages/success.json';
 import ruRUValidation from './messages/validation.json';
@@ -78,7 +79,8 @@ export default {
       command: ruRUCommand,
       subagent: ruRUSubagent,
       welcome: ruRUWelcome,
-      'discord-registry': ruRUDiscordRegistry
+      'discord-registry': ruRUDiscordRegistry,
+      im: ruRUIm
     },
     messages: {
       errors: ruRUErrors,

@@ -33,6 +33,7 @@ import jaJPCommand from './features/command.json';
 import jaJPSubagent from './features/subagent.json';
 import jaJPWelcome from './features/welcome.json';
 import jaJPDiscordRegistry from './features/discord-registry.json';
+import jaJPIm from './features/im.json';
 import jaJPErrors from './messages/errors.json';
 import jaJPSuccess from './messages/success.json';
 import jaJPValidation from './messages/validation.json';
@@ -78,7 +79,8 @@ export default {
       command: jaJPCommand,
       subagent: jaJPSubagent,
       welcome: jaJPWelcome,
-      'discord-registry': jaJPDiscordRegistry
+      'discord-registry': jaJPDiscordRegistry,
+      im: jaJPIm
     },
     messages: {
       errors: jaJPErrors,

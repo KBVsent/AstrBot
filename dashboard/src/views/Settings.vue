@@ -787,14 +787,15 @@ const systemConfigGroups = computed(() => {
         ]),
         createGroup('logs', [
             'log_level',
-            'inbound_message_log',
             'log_file_enable',
             'log_file_path',
             'log_file_max_mb',
             'trace_enable',
             'trace_db_path',
             'trace_db_max_mb',
-            'trace_retention_days'
+            'trace_retention_days',
+            'sns_client.enable',
+            'sns_client.retention_days'
         ]),
         createGroup('tempStorage', [
             'temp_dir_max_size'

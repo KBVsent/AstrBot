@@ -21,7 +21,6 @@ from astrbot.core.agent.runtime import (
 from astrbot.core.astr_agent_runtime.main_agent.config import MainAgentBuildConfig
 from astrbot.core.platform.agent_wakeup_event import AgentWakeupEvent
 from astrbot.core.utils.active_event_registry import active_event_registry
-from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.session_lock import session_lock_manager
 
 from .execution import execute_native_loop
@@ -182,11 +181,7 @@ class NativeAgentSession(AgentSession):
             status: Execution outcome, or None if execution raised an error.
         """
         event = turn.input.event
-        runner, req, provider = (
-            result.agent_runner,
-            result.provider_request,
-            result.provider,
-        )
+        runner, req = result.agent_runner, result.provider_request
         writer = result.conversation_events
         saved = False
         try:
@@ -223,13 +218,6 @@ class NativeAgentSession(AgentSession):
                 "astr_agent_complete",
                 stats=runner.stats.to_dict(),
                 resp=response.completion_text if response else None,
-            )
-            asyncio.create_task(
-                Metric.upload(
-                    llm_tick=1,
-                    model_name=provider.get_model(),
-                    provider_type=provider.meta().type,
-                )
             )
         finally:
             runner._resolve_unconsumed_follow_ups()

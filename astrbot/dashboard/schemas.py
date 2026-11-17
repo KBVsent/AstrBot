@@ -254,6 +254,20 @@ class ImMessageRequest(OpenModel):
     type: str | None = None
 
 
+class SnsSessionRequest(BaseModel):
+    umo: str = Field(min_length=1, max_length=512)
+
+
+class SnsSessionPatchRequest(SnsSessionRequest):
+    pinned: bool | None = None
+    keep_forever: bool | None = None
+
+
+class SnsMessageSendRequest(SnsSessionRequest):
+    text: str = Field(min_length=1, max_length=10000)
+    client_id: str = Field(min_length=1, max_length=128)
+
+
 class KnowledgeBaseRequest(OpenModel):
     kb_name: str | None = Field(None, alias="name")
     description: str | None = None

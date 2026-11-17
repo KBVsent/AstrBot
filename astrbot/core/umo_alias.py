@@ -38,6 +38,14 @@ def get_event_auto_name(event: Any, *, fallback_to_id: bool = True) -> str:
     if group_id:
         group_name = normalize_umo_name(getattr(group, "group_name", None))
         if group_name:
+            # Discord puts the channel in group_name and the server in this extra.
+            guild_name = (
+                normalize_umo_name(event.get_extra("guild_name"))
+                if hasattr(event, "get_extra")
+                else ""
+            )
+            if guild_name:
+                return normalize_umo_name(f"{guild_name} / {group_name}")
             return group_name
         return normalize_umo_name(group_id) if fallback_to_id else ""
 

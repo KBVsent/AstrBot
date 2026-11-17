@@ -318,7 +318,6 @@ async def test_native_parent_waits_for_child_without_blocking_delivery(
     ]
     monkeypatch.setattr(builder, "build_main_agent", build)
     monkeypatch.setattr(native_session, "record_agent_stats", AsyncMock())
-    monkeypatch.setattr(native_session.Metric, "upload", AsyncMock())
     turn = await parent.run_turn(
         MainAgentInput(
             event=env.event,
@@ -414,7 +413,6 @@ async def test_idle_result_runs_through_pipeline_once_and_commits_to_parent(
     env.context.conversation_manager.update_conversation.side_effect = save
     monkeypatch.setattr(builder, "build_main_agent", build)
     monkeypatch.setattr(native_session, "record_agent_stats", AsyncMock())
-    monkeypatch.setattr(native_session.Metric, "upload", AsyncMock())
     scheduler = PipelineScheduler(
         PipelineContext(
             config,

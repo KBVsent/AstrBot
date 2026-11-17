@@ -16,6 +16,9 @@ from astrbot.core.db.po import (
     CommandConflict,
     ConversationRead,
     CronJob,
+    ImMessage,
+    ImMessageWrite,
+    ImSession,
     Persona,
     PersonaFolder,
     PlatformMessageHistory,
@@ -114,6 +117,14 @@ class BaseDatabase(abc.ABC):
         timestamp: datetime.datetime | None = None,
     ) -> None:
         """Insert a new platform statistic record."""
+        ...
+
+    @abc.abstractmethod
+    async def insert_platform_stats_batch(
+        self,
+        records: list[dict],
+    ) -> None:
+        """Upsert many pre-aggregated platform send counts in a single transaction."""
         ...
 
     @abc.abstractmethod
@@ -1051,6 +1062,117 @@ class BaseDatabase(abc.ABC):
             sender ID, most recently updated first. Exact ID resolution returns
             one record per ID instead.
         """
+        ...
+
+    # ====
+    # SNS Client Messages
+    # ====
+
+    @abc.abstractmethod
+    async def insert_im_messages(
+        self, writes: list[ImMessageWrite]
+    ) -> list[tuple[ImMessage, ImSession]]:
+        """Insert messages and update their sessions and names in one transaction.
+
+        Args:
+            writes: Queued messages in arrival order.
+
+        Returns:
+            Each inserted message with its session state right after that message.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def purge_im_messages_batch(
+        self, cutoff: datetime.datetime, limit: int
+    ) -> int:
+        """Delete up to limit messages older than cutoff in one transaction.
+
+        Sessions marked keep_forever are skipped, and every session that lost
+        messages has purged_until raised to cutoff.
+
+        Returns:
+            Number of deleted messages.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def list_im_sessions(
+        self,
+        *,
+        message_type: str | None = None,
+        platform_id: str | None = None,
+        query: str | None = None,
+        after: tuple[bool, datetime.datetime, str] | None = None,
+        limit: int = 50,
+    ) -> list[tuple[ImSession, UmoAlias | None]]:
+        """List sessions pinned first, then newest first, with their name records.
+
+        Args:
+            message_type: Exact message type filter.
+            platform_id: Exact platform instance filter.
+            query: Substring of the display name or the session id.
+            after: Sort key (pinned, last_time, umo) of the previous page's last row.
+            limit: Maximum number of rows.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def count_unread_im_sessions(self) -> int:
+        """Count sessions with at least one unread message."""
+        ...
+
+    @abc.abstractmethod
+    async def get_im_session(self, umo: str) -> ImSession | None:
+        """Get one SNS session."""
+        ...
+
+    @abc.abstractmethod
+    async def update_im_session(self, umo: str, **values: T.Any) -> ImSession | None:
+        """Set session columns and return the new row, or None when it does not exist."""
+        ...
+
+    @abc.abstractmethod
+    async def delete_im_session(self, umo: str) -> bool:
+        """Delete a session with all its messages; False when it did not exist."""
+        ...
+
+    @abc.abstractmethod
+    async def list_im_messages(
+        self,
+        umo: str,
+        *,
+        before_id: int | None = None,
+        after_id: int | None = None,
+        limit: int = 30,
+    ) -> list[ImMessage]:
+        """Return messages of one session in ascending id order.
+
+        With after_id the oldest messages after it are returned; otherwise the
+        newest ones, optionally below before_id.
+        """
+        ...
+
+    @abc.abstractmethod
+    async def get_im_message(self, message_id: int) -> ImMessage | None:
+        """Get one SNS message by id."""
+        ...
+
+    @abc.abstractmethod
+    async def get_im_message_by_client_id(self, client_id: str) -> ImMessage | None:
+        """Get the WebUI message submitted with this client id."""
+        ...
+
+    @abc.abstractmethod
+    async def update_im_message_status(
+        self, message_id: int, status: str, error: str | None
+    ) -> ImMessage | None:
+        """Set a message's delivery status; None when the message is gone."""
+        ...
+
+    @abc.abstractmethod
+    async def fail_interrupted_im_sends(self) -> None:
+        """Mark messages left in sending by a previous process as failed."""
         ...
 
     # ====

@@ -39,6 +39,7 @@ from astrbot.core.platform.manager import PlatformManager
 from astrbot.core.platform_message_history_mgr import PlatformMessageHistoryManager
 from astrbot.core.process_restart import restart_process
 from astrbot.core.provider.manager import ProviderManager
+from astrbot.core.sns_recorder import SnsMessageWriter, SnsRetentionCleaner
 from astrbot.core.star.context import Context
 from astrbot.core.star.star_handler import EventType, star_handlers_registry, star_map
 from astrbot.core.star.star_manager import PluginManager
@@ -73,6 +74,8 @@ class AstrBotCoreLifecycle:
         self.agent_runtimes: dict[str, AgentRuntime] = {}
         self.cron_manager: CronJobManager | None = None
         self.temp_dir_cleaner: TempDirCleaner | None = None
+        self.sns_writer: SnsMessageWriter | None = None
+        self.sns_cleaner: SnsRetentionCleaner | None = None
         self._default_chat_provider_warning_emitted = False
 
         # 设置代理
@@ -184,6 +187,12 @@ class AstrBotCoreLifecycle:
                 TempDirCleaner.CONFIG_KEY,
                 TempDirCleaner.DEFAULT_MAX_SIZE,
             ),
+        )
+        self.sns_writer = SnsMessageWriter(
+            self.db, self.astrbot_config_mgr.default_conf
+        )
+        self.sns_cleaner = SnsRetentionCleaner(
+            self.db, self.astrbot_config_mgr.default_conf
         )
 
         # apply migration
@@ -321,6 +330,16 @@ class AstrBotCoreLifecycle:
                 self.temp_dir_cleaner.run(),
                 name="temp_dir_cleaner",
             )
+        sns_tasks = []
+        if self.sns_writer:
+            self.sns_writer.install()
+            sns_tasks.append(
+                asyncio.create_task(self.sns_writer.run(), name="sns_writer")
+            )
+        if self.sns_cleaner:
+            sns_tasks.append(
+                asyncio.create_task(self.sns_cleaner.run(), name="sns_cleaner")
+            )
         diagnostic_tasks = create_event_loop_diagnostic_tasks()
 
         # 把插件中注册的所有协程函数注册到事件总线中并执行
@@ -330,6 +349,7 @@ class AstrBotCoreLifecycle:
 
         tasks_ = [
             event_bus_task,
+            *sns_tasks,
             *diagnostic_tasks,
             *(extra_tasks if extra_tasks else []),
         ]
@@ -390,6 +410,8 @@ class AstrBotCoreLifecycle:
         """停止 AstrBot 核心生命周期管理类, 取消所有当前任务并终止各个管理器."""
         if self.temp_dir_cleaner:
             await self.temp_dir_cleaner.stop()
+        if self.sns_cleaner:
+            await self.sns_cleaner.stop()
 
         # 请求停止所有正在运行的异步任务
         for task in self.curr_tasks:
@@ -420,17 +442,23 @@ class AstrBotCoreLifecycle:
             await sp.close()
         self.dashboard_shutdown_event.set()
 
-        # 落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），避免优雅关闭丢失最后一个窗口
+        # 落库内存中尚未刷写的统计数据，避免优雅关闭丢失最后一个窗口
         try:
             from astrbot.core.utils.stat_recorders import (
                 command_stat_recorder,
+                platform_stat_recorder,
                 session_activity_recorder,
             )
 
             await session_activity_recorder.flush()
             await command_stat_recorder.flush()
+            await platform_stat_recorder.flush()
         except Exception as e:
             logger.warning(f"刷写统计数据失败: {e}")
+
+        # 排空 SNS 写入队列：须在平台停止之后、引擎释放之前
+        if self.sns_writer:
+            await self.sns_writer.close()
 
         # 再次遍历curr_tasks等待每个任务真正结束
         for task in self.curr_tasks:
@@ -467,18 +495,22 @@ class AstrBotCoreLifecycle:
             await sp.close()
         self.dashboard_shutdown_event.set()
 
-        # 重启会通过 os.execv 替换进程，先落库内存中尚未刷写的统计数据（会话活跃 / 指令使用），
+        # 重启会通过 os.execv 替换进程，先落库内存中尚未刷写的统计数据，
         # 避免丢失最近最多约一个 flush 窗口的待写数据
         try:
             from astrbot.core.utils.stat_recorders import (
                 command_stat_recorder,
+                platform_stat_recorder,
                 session_activity_recorder,
             )
 
             await session_activity_recorder.flush()
             await command_stat_recorder.flush()
+            await platform_stat_recorder.flush()
         except Exception as e:
             logger.warning(f"刷写统计数据失败: {e}")
+        if self.sns_writer:
+            await self.sns_writer.close()
 
         threading.Thread(
             target=restart_process,

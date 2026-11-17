@@ -710,7 +710,6 @@ async def test_install_updates_existing_plugin_and_restores_on_failure(
     monkeypatch.setattr(
         plugin_manager_pm._updater, "_clone_repository", clone_repository
     )
-    monkeypatch.setattr(star_manager_module.Metric, "upload", AsyncMock())
     events = []
 
     async def ensure_requirements(plugin_dir_path, plugin_label):
@@ -889,7 +888,6 @@ async def test_url_install_preparation_failure_preserves_existing_plugin(
     terminate = AsyncMock()
     monkeypatch.setattr(plugin_manager_pm, "load", load)
     monkeypatch.setattr(plugin_manager_pm, "_terminate_plugin", terminate)
-    monkeypatch.setattr(star_manager_module.Metric, "upload", AsyncMock())
 
     async def prepare(*args):
         if install_source == "git":
@@ -1021,7 +1019,6 @@ async def test_upload_update_reloads_runtime_and_preserves_activation(
             Path(path).write_bytes(zip_path.read_bytes())
 
         monkeypatch.setattr(plugin_manager_pm._updater, "_download_file", download_file)
-        monkeypatch.setattr(star_manager_module.Metric, "upload", AsyncMock())
         if install_source == "upload":
             operation = plugin_manager_pm.install_plugin_from_file(
                 str(zip_path), ignore_version_check=True

@@ -3,8 +3,7 @@
 把"每条事件一个后台 task + 一个独立写事务"的热点写入，改为按业务键在内存中
 合并、由单个后台 worker 周期性批量 UPSERT，缓解 SQLite 单写者锁竞争。
 
-:class:`PeriodicUpsertAggregator` 是通用骨架；:data:`session_activity_recorder`
-与 :data:`command_stat_recorder` 是两个具体实例。
+PeriodicUpsertAggregator 是通用骨架，模块末尾是各统计表的具体实例。
 
 ``record`` 同步、无 IO，在单事件循环内对 ``_pending`` 的读改写是原子的；``flush``
 通过整体替换字典引用做快照，无需显式锁。
@@ -14,8 +13,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 from astrbot.core import db_helper, logger
+
+if TYPE_CHECKING:
+    from astrbot.core.platform.platform_metadata import PlatformMetadata
 
 
 class PeriodicUpsertAggregator:
@@ -142,3 +146,19 @@ command_stat_recorder = PeriodicUpsertAggregator(
     ),
     flush_fn=lambda records: db_helper.insert_command_stats_batch(records),
 )
+
+# 平台发送计数（按小时、适配器实例聚合）。
+platform_stat_recorder = PeriodicUpsertAggregator(
+    name="平台发送统计",
+    key_fields=("timestamp", "platform_id", "platform_type"),
+    flush_fn=lambda records: db_helper.insert_platform_stats_batch(records),
+)
+
+
+def record_platform_send(meta: PlatformMetadata) -> None:
+    """为 meta 对应的适配器实例记一次发送。"""
+    platform_stat_recorder.record(
+        timestamp=datetime.now().replace(minute=0, second=0, microsecond=0),
+        platform_id=meta.id,
+        platform_type=meta.name,
+    )

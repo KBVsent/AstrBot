@@ -167,7 +167,9 @@ async def runtime(monkeypatch):
             provider=provider,
             request=prepared.request,
             run_context=ContextWrapper(
-                context=SimpleNamespace(event=event, send_to_user=True, _output_turn=None)
+                context=SimpleNamespace(
+                    event=event, send_to_user=True, _output_turn=None
+                )
             ),
             tool_executor=MagicMock(),
             agent_hooks=BaseAgentRunHooks(),
@@ -177,7 +179,6 @@ async def runtime(monkeypatch):
 
     monkeypatch.setattr(native_builder, "build_main_agent", build)
     monkeypatch.setattr(native_session, "record_agent_stats", AsyncMock())
-    monkeypatch.setattr(native_session.Metric, "upload", AsyncMock())
     monkeypatch.setitem(trace_module.astrbot_config, "trace_enable", True)
     monkeypatch.setattr(
         trace_module,

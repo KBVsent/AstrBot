@@ -35,7 +35,8 @@ const isViewportLockedRoute = computed(
     isProviderPageRoute.value ||
     isPlatformPageRoute.value ||
     route.path === "/config" ||
-    route.path === "/settings",
+    route.path === "/settings" ||
+    route.path === "/data/messages",
 );
 const isFullScreenRoute = computed(
   () => isCurrentChatRoute.value || isPluginViewRoute.value,

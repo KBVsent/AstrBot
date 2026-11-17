@@ -1,0 +1,89 @@
+{
+  "list": {
+    "search": "Search by session name or ID",
+    "platformFilter": "Filter by platform",
+    "allPlatforms": "All platforms",
+    "empty": "No sessions",
+    "emptyHint": "Sessions appear here once the bot receives or sends a message",
+    "filteredEmpty": "No sessions match the filters",
+    "loadFailed": "Failed to load sessions",
+    "pinned": "Pinned",
+    "keepForever": "Kept permanently"
+  },
+  "types": {
+    "all": "All",
+    "GroupMessage": "Groups",
+    "FriendMessage": "Private",
+    "OtherMessage": "Other"
+  },
+  "session": {
+    "menu": "Session actions",
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "keep": "Keep permanently",
+    "unkeep": "Stop keeping permanently",
+    "copyUmo": "Copy UMO",
+    "delete": "Delete session",
+    "deleteConfirm": "The session \"{name}\" and all of its messages will be deleted. This action cannot be undone.",
+    "deleted": "Session deleted",
+    "copied": "UMO copied",
+    "copyFailed": "Copy failed",
+    "actionFailed": "Action failed: {error}"
+  },
+  "stream": {
+    "selectSession": "Select a session to view its messages",
+    "empty": "No messages",
+    "loadFailed": "Failed to load messages",
+    "olderFailed": "Failed to load earlier messages",
+    "purged": "Earlier messages have been cleaned up",
+    "newMessages": "New messages: {count}",
+    "back": "Back to sessions",
+    "unknownSender": "Unknown sender",
+    "quotedMessage": "Quoted a message"
+  },
+  "segment": {
+    "image": "View image",
+    "imageExpired": "Image expired",
+    "empty": "[Empty message]",
+    "unknown": "[Message]",
+    "other": {
+      "Image": "[Image]",
+      "Record": "[Voice]",
+      "Video": "[Video]",
+      "File": "[File]",
+      "Face": "[Emoji]",
+      "Forward": "[Forwarded messages]",
+      "Node": "[Forwarded messages]",
+      "Nodes": "[Forwarded messages]",
+      "Poke": "[Poke]",
+      "Share": "[Share]",
+      "Music": "[Music]",
+      "Json": "[Card]",
+      "Location": "[Location]",
+      "Contact": "[Contact]",
+      "RPS": "[Rock paper scissors]",
+      "Dice": "[Dice]",
+      "Shake": "[Window shake]",
+      "ActionRow": "[Buttons]",
+      "Button": "[Buttons]",
+      "ButtonInteraction": "[Buttons]"
+    }
+  },
+  "status": {
+    "sending": "Sending",
+    "failed": "Failed to send",
+    "unknown": "Delivery not confirmed"
+  },
+  "composer": {
+    "placeholder": "Enter a message. Enter sends, Shift + Enter adds a line break",
+    "send": "Send"
+  },
+  "time": {
+    "yesterday": "Yesterday"
+  },
+  "actions": {
+    "retry": "Retry",
+    "confirm": "Check delivery",
+    "resend": "Resend"
+  }
+}

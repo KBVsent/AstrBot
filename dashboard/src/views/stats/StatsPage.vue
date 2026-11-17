@@ -881,7 +881,10 @@ const platformRanking = computed(() =>
     .slice(0, 6)
     .map((platform) => ({
       ...platform,
-      icon: getPlatformIcon(platform.name)
+      icon: getPlatformIcon(
+        availablePlatforms.value.find((option) => option.id === platform.name)?.type ??
+          platform.name
+      )
     }))
 )
 

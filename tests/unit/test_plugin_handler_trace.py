@@ -43,6 +43,7 @@ async def test_message_handler_trace_category(monkeypatch, event_filter, categor
     event.get_extra.side_effect = extras.get
     event.set_extra.side_effect = extras.__setitem__
     event.is_stopped.return_value = False
+    event.get_message_str.return_value = "test"
 
     async for _ in star_request.StarRequestSubStage().process(event):
         pass

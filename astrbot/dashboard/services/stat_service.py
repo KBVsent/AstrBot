@@ -276,29 +276,6 @@ class StatService:
             aware_end,
         )
 
-    def _resolve_platform_keys(
-        self, platform_id: str | None
-    ) -> tuple[str | None, str | None]:
-        """把下拉选中的适配器实例 id 解析为各统计表使用的过滤键。
-
-        Returns:
-            (id_key, name_key)。id_key 用于 command_stats / session_activity_stats /
-            provider_stats(umo 前缀)；name_key（适配器类型名）用于 platform_stats。
-            单实例默认部署下二者相同。
-        """
-        if not platform_id:
-            return None, None
-        name_key = None
-        for inst in self.core_lifecycle.platform_manager.get_insts():
-            try:
-                meta = inst.meta()
-            except Exception:
-                continue
-            if meta.id == platform_id:
-                name_key = meta.name
-                break
-        return platform_id, (name_key or platform_id)
-
     def _list_available_platforms(self) -> list[dict]:
         """列出当前已配置的适配器实例，供前端下拉筛选使用。"""
         platforms = []
@@ -321,10 +298,9 @@ class StatService:
     ) -> dict:
         """统计一个本地自然日内的消息量，可按适配器实例过滤。"""
         date_norm, naive_start, naive_end, _, _ = self._resolve_day(date)
-        _, name_key = self._resolve_platform_keys(platform_id)
 
         rows = await self.db_helper.get_platform_stats_in_range(
-            naive_start, naive_end, name_key
+            naive_start, naive_end, platform_id
         )
         hourly: dict[int, int] = defaultdict(int)
         for row in rows:
@@ -334,7 +310,7 @@ class StatService:
             int((naive_start + timedelta(hours=hour)).timestamp()) for hour in range(24)
         ]
         grouped = await self.db_helper.get_grouped_platform_stats_in_range(
-            naive_start, naive_end, name_key
+            naive_start, naive_end, platform_id
         )
         return {
             "date": date_norm,
@@ -342,11 +318,11 @@ class StatService:
             "available_platforms": self._list_available_platforms(),
             "platform": [{"name": pid, "count": count} for pid, count in grouped],
             "message_count": await self.db_helper.get_total_message_count_in_range(
-                naive_start, naive_end, name_key
+                naive_start, naive_end, platform_id
             ),
             "previous_message_count": (
                 await self.db_helper.get_total_message_count_in_range(
-                    naive_start - timedelta(days=1), naive_start, name_key
+                    naive_start - timedelta(days=1), naive_start, platform_id
                 )
             ),
             "message_time_series": [[ts, hourly.get(ts, 0)] for ts in hour_starts],
@@ -593,9 +569,8 @@ class StatService:
         """获取指定自然日内最常被触发的指令排行。"""
         try:
             _, naive_start, naive_end, _, _ = self._resolve_day(date)
-            id_key, _ = self._resolve_platform_keys(platform_id)
             rows = await self.db_helper.get_top_commands(
-                naive_start, naive_end, id_key, limit
+                naive_start, naive_end, platform_id, limit
             )
         except StatServiceError:
             raise
@@ -622,15 +597,14 @@ class StatService:
         """获取指定自然日的独立用户数 / 独立群数及活跃排行。"""
         try:
             date_norm, *_ = self._resolve_day(date)
-            id_key, _ = self._resolve_platform_keys(platform_id)
             data = await self.db_helper.get_active_session_stats(
-                date_norm, id_key, limit
+                date_norm, platform_id, limit
             )
             previous_date = (
                 datetime.strptime(date_norm, "%Y-%m-%d") - timedelta(days=1)
             ).strftime("%Y-%m-%d")
             previous_data = await self.db_helper.get_active_session_stats(
-                previous_date, id_key, 0
+                previous_date, platform_id, 0
             )
         except StatServiceError:
             raise
@@ -661,7 +635,6 @@ class StatService:
     ) -> dict:
         try:
             _, _, _, aware_start, aware_end = self._resolve_day(date)
-            id_key, _ = self._resolve_platform_keys(platform_id)
             local_tz = aware_start.tzinfo or timezone.utc
             query_start_utc = aware_start.astimezone(timezone.utc)
             query_end_utc = aware_end.astimezone(timezone.utc)
@@ -672,9 +645,9 @@ class StatService:
                     ProviderStat.created_at >= query_start_utc,
                     ProviderStat.created_at < query_end_utc,
                 )
-                if id_key:
+                if platform_id:
                     # umo 形如 "platform_id:message_type:session_id"，前缀即平台实例 id
-                    stmt = stmt.where(col(ProviderStat.umo).like(f"{id_key}:%"))
+                    stmt = stmt.where(col(ProviderStat.umo).like(f"{platform_id}:%"))
                 stmt = stmt.order_by(col(ProviderStat.created_at).asc())
                 result = await session.execute(stmt)
                 records = result.scalars().all()

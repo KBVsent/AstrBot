@@ -1,9 +1,7 @@
 import abc
 import asyncio
-import hashlib
 import os
 import re
-import uuid
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -29,8 +27,9 @@ from astrbot.core.message.components import (
 from astrbot.core.message.message_event_result import MessageChain, MessageEventResult
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.provider.entities import ProviderRequest
+from astrbot.core.sns_recorder import SNS_UMO_EXTRA, get_sns_writer
 from astrbot.core.utils.active_event_registry import active_event_registry
-from astrbot.core.utils.metrics import Metric
+from astrbot.core.utils.stat_recorders import record_platform_send
 from astrbot.core.utils.trace import TraceSpan
 
 from .astrbot_message import AstrBotMessage, Group
@@ -385,9 +384,7 @@ class AstrMessageEvent(abc.ABC):
         目前仅支持: telegram，qq official 私聊。
         Fallback仅支持 aiocqhttp。
         """
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name),
-        )
+        record_platform_send(self.platform_meta)
         self._has_send_oper = True
 
     def is_callback_event(self) -> bool:
@@ -624,16 +621,15 @@ class AstrMessageEvent(abc.ABC):
                 component_count=len(message.chain),
                 message_type=message.type,
             )
-        # Leverage BLAKE2 hash function to generate a non-reversible hash of the sender ID for privacy.
-        hash_obj = hashlib.blake2b(self.get_sender_id().encode("utf-8"), digest_size=16)
-        sid = str(uuid.UUID(bytes=hash_obj.digest()))
-        asyncio.create_task(
-            Metric.upload(
-                msg_event_tick=1,
-                adapter_name=self.platform_meta.name,
-                sid=sid,
-            ),
-        )
+            if (sns_writer := get_sns_writer()) is not None:
+                sns_writer.record_outbound(
+                    self.get_extra(SNS_UMO_EXTRA) or self.unified_msg_origin,
+                    self.platform_meta.name,
+                    self.get_self_id(),
+                    message.chain,
+                    self,
+                )
+        record_platform_send(self.platform_meta)
         self._has_send_oper = True
 
     async def react(self, emoji: str) -> None:

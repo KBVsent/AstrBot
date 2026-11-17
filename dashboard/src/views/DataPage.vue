@@ -5,6 +5,7 @@ import {
   ChartNoAxesColumnIncreasing,
   Logs,
   MessageSquareText,
+  MessagesSquare,
   Waypoints,
 } from "@lucide/vue";
 import { useI18n } from "@/i18n/composables";
@@ -18,6 +19,12 @@ const tabs = computed(() => [
     label: t("core.navigation.dataTabs.statistics"),
     routeName: "Stats",
     icon: ChartNoAxesColumnIncreasing,
+  },
+  {
+    value: "messages",
+    label: t("core.navigation.dataTabs.messages"),
+    routeName: "Messages",
+    icon: MessagesSquare,
   },
   {
     value: "conversations",
@@ -40,6 +47,8 @@ const tabs = computed(() => [
 ]);
 
 const activeTab = computed(() => String(route.meta.dataTab || "statistics"));
+// The messages tab is viewport locked in FullLayout and needs the remaining height.
+const fillsHeight = computed(() => activeTab.value === "messages");
 
 // Watch the route metadata directly so leaving this workspace does not save
 // the Statistics fallback as the last opened tab.
@@ -54,7 +63,7 @@ watch(
 </script>
 
 <template>
-  <div class="data-workspace">
+  <div class="data-workspace" :class="{ 'data-workspace--fill': fillsHeight }">
     <div class="data-tabs-scroll">
       <nav
         class="data-tabs"
@@ -96,6 +105,16 @@ watch(
 .data-workspace {
   min-width: 0;
   width: 100%;
+}
+
+.data-workspace--fill {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.data-workspace--fill > .data-tabs-scroll {
+  flex: 0 0 auto;
 }
 
 .data-tabs-scroll {

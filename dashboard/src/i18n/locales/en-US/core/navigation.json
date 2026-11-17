@@ -8,6 +8,7 @@
   "data": "Data & Logs",
   "dataTabs": {
     "statistics": "Statistics",
+    "messages": "Messages",
     "conversations": "Conversations",
     "logs": "Logs",
     "trace": "Trace"

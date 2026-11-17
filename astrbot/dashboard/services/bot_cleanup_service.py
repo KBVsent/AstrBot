@@ -8,14 +8,20 @@ from astrbot.core import sp
 from astrbot.core.config_bindings import BINDING_KEY
 from astrbot.core.core_lifecycle import AstrBotCoreLifecycle
 from astrbot.core.db.po import (
+    CommandStat,
     ConversationEvent,
     ConversationV3,
+    ImMessage,
+    ImSession,
     PlatformMessageHistory,
+    PlatformStat,
     Preference,
     ProviderStat,
+    SessionActivityStat,
     UmoAlias,
     UmoSender,
 )
+from astrbot.core.sns_recorder import get_sns_writer
 from astrbot.core.utils.trace_store import get_trace_store
 from astrbot.dashboard.schemas import BotCleanupTarget
 from astrbot.dashboard.services.session_management_service import (
@@ -135,6 +141,10 @@ async def delete_bot_data(
             }
         )
 
+    if "message_history" in targets and (sns_writer := get_sns_writer()) is not None:
+        # Records queued before the adapter stopped must not recreate deleted rows.
+        await sns_writer.drain()
+
     async with core.db.get_db() as session:
         async with session.begin():
             if "conversations" in targets:
@@ -155,14 +165,17 @@ async def delete_bot_data(
                         PlatformMessageHistory.platform_id == bot_id
                     )
                 )
-                for model in (UmoAlias, UmoSender):
+                for model in (UmoAlias, UmoSender, ImSession, ImMessage):
                     await session.execute(
                         delete(model).where(
                             func.substr(model.umo, 1, len(prefix)) == prefix
                         )
                     )
             if "stats" in targets:
-                # PlatformStat aggregates adapter types, so it is shared by bots.
+                for stat_model in (PlatformStat, CommandStat, SessionActivityStat):
+                    await session.execute(
+                        delete(stat_model).where(stat_model.platform_id == bot_id)
+                    )
                 await session.execute(
                     delete(ProviderStat).where(
                         func.substr(ProviderStat.umo, 1, len(prefix)) == prefix

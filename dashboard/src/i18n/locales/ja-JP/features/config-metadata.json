@@ -1507,6 +1507,16 @@
         "description": "トレース保持日数",
         "hint": "既定は 7 日。保持期間または容量のどちらかに達すると古いデータを削除します。"
       },
+      "sns_client": {
+        "enable": {
+          "description": "チャットメッセージを記録",
+          "hint": "各プラットフォームで送受信したメッセージを記録し、WebUI のメッセージページで表示します。"
+        },
+        "retention_days": {
+          "description": "メッセージ保持日数",
+          "hint": "1 日 1 回削除します。0 で削除しません。長期保存の会話は対象外です。"
+        }
+      },
       "pip_install_arg": {
         "description": "pip インストールの追加引数",
         "hint": "プラグインの依存関係をインストールする際は、Python の pip を使用します。`--break-system-package` などの追加引数を指定できます。PyPI インデックスの TLS 証明書は既定で検証されます。自己署名/プライベート CA のミラーを使用する場合は、`--cert <CA バンドルのパス>` を指定する(推奨)か、明示的に `--trusted-host <ホスト名>` を追加してください。"
@@ -1518,10 +1528,6 @@
       "callback_api_base": {
         "description": "外部からアクセス可能なコールバック API アドレス",
         "hint": "外部サービスは、AstrBot が生成したコールバックリンク（ファイルダウンロードリンクなど）を通じて AstrBot バックエンドへアクセスする場合があります。AstrBot はデプロイ環境で外部から到達可能なホストアドレス（ホスト）を自動判定できないため、この設定で外部サービスから AstrBot へアクセスするアドレスを明示的に指定します。例: [http://localhost:6185](http://localhost:6185)、[https://example.com](https://example.com)。"
-      },
-      "disable_metrics": {
-        "description": "匿名利用統計を無効化",
-        "hint": "この設定を有効にすると、AstrBot は匿名の利用統計データをアップロードしません。"
       },
       "dashboard": {
         "trust_proxy_headers": {
@@ -1617,14 +1623,6 @@
       },
       "no_proxy": {
         "description": "プロキシを使用しないアドレス一覧"
-      },
-      "inbound_message_log": {
-        "description": "受信メッセージログ",
-        "hint": "「起動時のみ」は @、返信、ウェイクプレフィックス、コマンドに一致したメッセージを INFO で記録し、それ以外は DEBUG に下げます。「すべてのメッセージ」はすべての受信メッセージを INFO のまま記録します。",
-        "labels": [
-          "起動時のみ",
-          "すべてのメッセージ"
-        ]
       },
       "image_host": {
         "description": "画像ホストバックエンド",

@@ -42,6 +42,7 @@ from astrbot.core.provider.provider import (
     STTProvider,
     TTSProvider,
 )
+from astrbot.core.sns_recorder import get_sns_writer, sns_send_suppressed
 from astrbot.core.star.filter.platform_adapter_type import (
     ADAPTER_NAME_2_TYPE,
     PlatformAdapterType,
@@ -708,8 +709,35 @@ class Context:
 
         for platform in self.platform_manager.platform_insts:
             if platform.meta().id == session.platform_name:
-                await platform.send_by_session(session, message_chain)
+                # Taken before sending: the Discord adapter rewrites session in place.
+                umo = str(session)
+                # Discord, KOOK and WeCom send through an event, whose send must not
+                # record a second copy.
+                suppress_token = sns_send_suppressed.set(True)
+                try:
+                    await platform.send_by_session(session, message_chain)
+                finally:
+                    sns_send_suppressed.reset(suppress_token)
                 event = current_message_event.get()
+                # AgentWakeupEvent.send marks itself here and records the delivery
+                # in its own base send.
+                stream_event = streaming_response_event.get()
+                if (sns_writer := get_sns_writer()) is not None and (
+                    stream_event is None or stream_event.event_kind == "message"
+                ):
+                    answered = event
+                    if (
+                        answered is not None
+                        and answered.get_platform_id() != platform.meta().id
+                    ):
+                        answered = None
+                    sns_writer.record_outbound(
+                        umo,
+                        platform.meta().name,
+                        answered.get_self_id() if answered is not None else "",
+                        message_chain.chain,
+                        answered,
+                    )
                 if (
                     event is not None
                     and event._execution_active

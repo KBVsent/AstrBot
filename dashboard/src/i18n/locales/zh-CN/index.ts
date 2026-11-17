@@ -33,6 +33,7 @@ import zhCNCommand from './features/command.json';
 import zhCNSubagent from './features/subagent.json';
 import zhCNWelcome from './features/welcome.json';
 import zhCNDiscordRegistry from './features/discord-registry.json';
+import zhCNIm from './features/im.json';
 import zhCNErrors from './messages/errors.json';
 import zhCNSuccess from './messages/success.json';
 import zhCNValidation from './messages/validation.json';
@@ -78,7 +79,8 @@ export default {
       command: zhCNCommand,
       subagent: zhCNSubagent,
       welcome: zhCNWelcome,
-      'discord-registry': zhCNDiscordRegistry
+      'discord-registry': zhCNDiscordRegistry,
+      im: zhCNIm
     },
     messages: {
       errors: zhCNErrors,

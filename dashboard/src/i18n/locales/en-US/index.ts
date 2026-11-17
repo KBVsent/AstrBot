@@ -33,6 +33,7 @@ import enUSCommand from './features/command.json';
 import enUSSubagent from './features/subagent.json';
 import enUSWelcome from './features/welcome.json';
 import enUSDiscordRegistry from './features/discord-registry.json';
+import enUSIm from './features/im.json';
 import enUSErrors from './messages/errors.json';
 import enUSSuccess from './messages/success.json';
 import enUSValidation from './messages/validation.json';
@@ -78,7 +79,8 @@ export default {
       command: enUSCommand,
       subagent: enUSSubagent,
       welcome: enUSWelcome,
-      'discord-registry': enUSDiscordRegistry
+      'discord-registry': enUSDiscordRegistry,
+      im: enUSIm
     },
     messages: {
       errors: enUSErrors,

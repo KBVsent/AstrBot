@@ -1155,8 +1155,12 @@ class TestBackupIntegration:
             ),
         ],
         ids=[
-            "agent-config", "umo-alias", "umo-sender", "provider-stats",
-            "api-key", "revoked-api-key",
+            "agent-config",
+            "umo-alias",
+            "umo-sender",
+            "provider-stats",
+            "api-key",
+            "revoked-api-key",
         ],
     )
     async def test_persistent_models_roundtrip(
@@ -1185,7 +1189,9 @@ class TestBackupIntegration:
                 async with session.begin():
                     primary_key = next(iter(model.__table__.primary_key)).name
                     stale_key = (
-                        "stale-record" if isinstance(data.get(primary_key), str) else 999
+                        "stale-record"
+                        if isinstance(data.get(primary_key), str)
+                        else 999
                     )
                     session.add(model(**(data | {primary_key: stale_key})))
             exporter = AstrBotExporter(

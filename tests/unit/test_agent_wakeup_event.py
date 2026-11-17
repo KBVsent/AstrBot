@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -18,18 +18,18 @@ from astrbot.core.star.context import Context
 
 @pytest.fixture
 def wakeup_event(monkeypatch):
-    """Create a real event with controlled transport and metric upload.
+    """Create a real event with controlled transport and send counting.
 
     Args:
-        monkeypatch: Replaces network metric upload.
+        monkeypatch: Replaces the platform send counter.
 
     Returns:
-        Event, transport mock and metric mock.
+        Event, transport mock and send counter mock.
     """
     send = AsyncMock(return_value=True)
-    metric = AsyncMock()
+    metric = MagicMock()
     monkeypatch.setattr(
-        "astrbot.core.platform.astr_message_event.Metric.upload", metric
+        "astrbot.core.platform.astr_message_event.record_platform_send", metric
     )
     event = AgentWakeupEvent(
         context=SimpleNamespace(send_message=send),
@@ -146,7 +146,7 @@ async def test_send_accounting_respects_context_result(wakeup_event, outcomes):
 
     assert event._has_send_oper is any(outcomes)
     assert send.await_count == len(outcomes)
-    assert metric.await_count == sum(outcomes)
+    assert metric.call_count == sum(outcomes)
 
 
 @pytest.mark.asyncio
@@ -161,7 +161,7 @@ async def test_empty_stream_does_not_send(wakeup_event, empty_chunk):
 
     await event.send_streaming(chunks())
     send.assert_not_awaited()
-    metric.assert_not_awaited()
+    metric.assert_not_called()
     assert event._has_send_oper is False
 
 
@@ -179,7 +179,7 @@ async def test_send_exception_preserves_accounting(wakeup_event, prior_send):
 
     assert caught.value is error
     assert event._has_send_oper is prior_send
-    metric.assert_not_awaited()
+    metric.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -190,7 +190,7 @@ async def test_none_message_does_not_send(wakeup_event):
 
     assert event._has_send_oper is False
     send.assert_not_awaited()
-    metric.assert_not_awaited()
+    metric.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -206,5 +206,5 @@ async def test_missing_platform_does_not_record_send(wakeup_event, caplog, monke
     await asyncio.sleep(0)
 
     assert event._has_send_oper is False
-    metric.assert_not_awaited()
+    metric.assert_not_called()
     assert "cannot find platform" in caplog.text

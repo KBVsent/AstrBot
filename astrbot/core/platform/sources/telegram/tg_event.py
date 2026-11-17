@@ -30,7 +30,7 @@ from astrbot.api.message_components import (
 )
 from astrbot.api.platform import AstrBotMessage, Group, MessageType, PlatformMetadata
 from astrbot.core.platform.button_interaction import encode_button_callback
-from astrbot.core.utils.metrics import Metric
+from astrbot.core.utils.stat_recorders import record_platform_send
 
 
 def _is_gif(path: str) -> bool:
@@ -701,9 +701,7 @@ class TelegramPlatformEvent(AstrMessageEvent):
             )
 
         # 内联父类 send_streaming 的副作用（避免传入已消费的 generator）
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name),
-        )
+        record_platform_send(self.platform_meta)
         self._has_send_oper = True
 
     async def _send_streaming_draft(

@@ -77,17 +77,7 @@ AstrBot 团队**已尽合理努力在技术和策略层面设置安全与内容�
 
 如遇紧急情况（例如存在自伤或他伤风险），请立即联系当地的紧急救助电话或专业机构。
 
-## 8. 统计信息与隐私说明
-
-AstrBot 可能会收集有限的匿名统计信息，用于了解系统使用情况、发现问题以及持续改进项目。
-
-所收集的统计信息仅包括与系统运行和功能使用相关的基础技术指标，例如功能使用频率、错误信息等。
-
-AstrBot **不会收集、上传或存储您的对话内容、消息正文、输入文本，或任何能够识别您个人身份的敏感信息**。
-
-您可以手动关闭此项功能，通过在系统环境变量中设置 `ASTRBOT_DISABLE_METRICS=1` 来禁用匿名统计信息收集。
-
-## 9. 责任限制
+## 8. 责任限制
 
 在法律允许的最大范围内，AstrBot 团队不对因以下原因导致的任何直接或间接损失承担责任，包括但不限于：
 
@@ -96,7 +86,7 @@ AstrBot **不会收集、上传或存储您的对话内容、消息正文、输�
 * 系统生成的内容或输出；
 * 数据丢失、服务中断或安全事件。
 
-## 10. 条款的接受
+## 9. 条款的接受
 
 您一旦安装、运行、修改或使用 AstrBot，即确认：
 
@@ -106,7 +96,7 @@ AstrBot **不会收集、上传或存储您的对话内容、消息正文、输�
 
 如您不同意本声明的任何内容，请勿使用本项目。
 
-## 11. 许可与版权
+## 10. 许可与版权
 
 AstrBot 的源代码、文档及相关内容受版权法及相关法律保护。
 
@@ -114,7 +104,7 @@ AstrBot 的源代码、文档及相关内容受版权法及相关法律保护。
 
 除非法律另有规定或本声明另有明确说明，AstrBot 团队保留本项目的所有未明确授予的权利。
 
-## 12. 适用法律
+## 11. 适用法律
 
 本声明的解释与适用应遵循您所在地或项目发布地适用的法律法规。
 
@@ -200,17 +190,7 @@ please prioritize seeking help from qualified professionals, such as psychologis
 
 In case of emergency (for example, if there is a risk of self-harm or harm to others), please immediately contact your local emergency number or professional crisis support services.
 
-## 8. Metrics and Privacy
-
-AstrBot may collect a limited amount of anonymous usage statistics to understand system usage, identify issues, and continuously improve the project.
-
-Collected metrics are limited to basic technical indicators related to system operation and feature usage, such as feature usage frequency and error information.
-
-AstrBot **does not collect, upload, or store your conversation content, message bodies, input text, or any personally identifiable or sensitive information**.
-
-You may manually disable this feature by setting the environment variable `ASTRBOT_DISABLE_METRICS=1` to turn off anonymous metrics collection.
-
-## 9. Limitation of Liability
+## 8. Limitation of Liability
 
 To the maximum extent permitted by law, the AstrBot Team shall not be liable for any direct or indirect losses arising from, including but not limited to:
 
@@ -219,7 +199,7 @@ To the maximum extent permitted by law, the AstrBot Team shall not be liable for
 * Generated content or system outputs;
 * Data loss, service interruptions, or security incidents.
 
-## 10. Acceptance of Terms
+## 9. Acceptance of Terms
 
 By installing, running, modifying, or using AstrBot, you confirm that:
 
@@ -229,7 +209,7 @@ By installing, running, modifying, or using AstrBot, you confirm that:
 
 If you do not agree with any part of this Notice, please do not use this project.
 
-## 11. License and Copyright
+## 10. License and Copyright
 
 The source code, documentation, and related materials of AstrBot are protected by copyright laws and applicable regulations.
 
@@ -237,7 +217,7 @@ Subject to compliance with this Notice and the AGPLv3 license, AstrBot grants yo
 
 Unless otherwise required by law or expressly stated in this Notice, the AstrBot Team reserves all rights not expressly granted.
 
-## 12. Governing Law
+## 11. Governing Law
 
 The interpretation and application of this Notice shall be governed by the laws and regulations applicable in your jurisdiction or the jurisdiction where the project is released.
 

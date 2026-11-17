@@ -536,6 +536,73 @@ class UmoSender(TimestampMixin, SQLModel, table=True):
     __table_args__ = (UniqueConstraint("umo", "sender_id", name="uix_umo_sender"),)
 
 
+class ImSession(TimestampMixin, SQLModel, table=True):
+    """One SNS client conversation per original UMO; purging messages keeps the row."""
+
+    __tablename__ = "im_sessions"  # pyright: ignore[reportAssignmentType]
+
+    umo: str = Field(primary_key=True)
+    platform_id: str = Field(nullable=False)
+    message_type: str = Field(nullable=False)
+    last_message_id: int | None = Field(default=None)
+    last_preview: str = Field(default="", nullable=False)
+    last_sender_name: str = Field(default="", nullable=False)
+    last_time: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=False), nullable=False),
+    )
+    unread_count: int = Field(default=0, nullable=False)
+    pinned: bool = Field(default=False, nullable=False)
+    keep_forever: bool = Field(default=False, nullable=False)
+    purged_until: datetime | None = Field(
+        default=None, sa_column=Column(DateTime(timezone=False), nullable=True)
+    )
+
+    __table_args__ = (Index("ix_im_sessions_pinned_last_time", "pinned", "last_time"),)
+
+
+class ImMessage(SQLModel, table=True):
+    """An inbound or outbound message shown by the SNS client."""
+
+    __tablename__ = "im_messages"  # pyright: ignore[reportAssignmentType]
+
+    id: int | None = Field(default=None, primary_key=True)
+    umo: str = Field(nullable=False)
+    direction: str = Field(nullable=False)  # "in" / "out"
+    platform_message_id: str | None = Field(default=None)
+    sender_id: str = Field(default="", nullable=False)
+    sender_name: str = Field(default="", nullable=False)
+    content: list = Field(default_factory=list, sa_type=JSON)
+    source: str | None = Field(default=None)
+    client_id: str | None = Field(default=None)
+    status: str = Field(default="ok", nullable=False)
+    error: str | None = Field(default=None, sa_type=Text)
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        sa_column=Column(DateTime(timezone=False), nullable=False),
+    )
+
+    __table_args__ = (
+        Index("ix_im_messages_umo_id", "umo", "id"),
+        Index("ix_im_messages_created_at", "created_at"),
+        Index("ix_im_messages_client_id", "client_id", unique=True),
+        # The id is a client cursor, so deleted ids must never be reused.
+        {"sqlite_autoincrement": True},
+    )
+
+
+@dataclass(slots=True)
+class ImMessageWrite:
+    """A queued message plus the session fields its commit updates."""
+
+    message: ImMessage
+    platform_id: str
+    message_type: str
+    preview: str
+    session_name: str = ""
+    """Inbound automatic session name; empty leaves umo_aliases untouched."""
+
+
 class Attachment(TimestampMixin, SQLModel, table=True):
     """This class represents attachments for messages in AstrBot.
 

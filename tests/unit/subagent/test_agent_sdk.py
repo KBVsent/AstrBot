@@ -72,7 +72,6 @@ async def sdk(environment, monkeypatch):
     env.platform_send = AsyncMock()
     env.context.platform_manager.platform_insts[0].send_by_session = env.platform_send
     monkeypatch.setattr(native_session, "record_agent_stats", AsyncMock())
-    monkeypatch.setattr(native_session.Metric, "upload", AsyncMock())
     try:
         yield env
     finally:

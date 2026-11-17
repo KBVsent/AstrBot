@@ -60,7 +60,6 @@ async def test_third_party_runner_receives_inline_profile_config(
         third_party, "AgentContextWrapper", MagicMock(return_value=object())
     )
     monkeypatch.setattr(third_party, "call_event_hook", AsyncMock(return_value=False))
-    monkeypatch.setattr(third_party.Metric, "upload", AsyncMock(return_value=None))
 
     config = {
         "agent": {"runtime": runner_type, "config": inline_config},
@@ -150,7 +149,6 @@ async def test_third_party_skips_unavailable_attachment(
         third_party, "AgentContextWrapper", MagicMock(return_value=object())
     )
     monkeypatch.setattr(third_party, "call_event_hook", AsyncMock(return_value=False))
-    monkeypatch.setattr(third_party.Metric, "upload", AsyncMock(return_value=None))
 
     async def unavailable(self):
         raise ValueError("No valid file or URL provided")

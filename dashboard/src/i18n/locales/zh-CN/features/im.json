@@ -1,0 +1,89 @@
+{
+  "list": {
+    "search": "搜索会话名称或 ID",
+    "platformFilter": "按平台筛选",
+    "allPlatforms": "全部平台",
+    "empty": "暂无会话",
+    "emptyHint": "机器人收到或发送消息后，会话显示在此处",
+    "filteredEmpty": "没有符合条件的会话",
+    "loadFailed": "会话列表加载失败",
+    "pinned": "已置顶",
+    "keepForever": "长期保留"
+  },
+  "types": {
+    "all": "全部",
+    "GroupMessage": "群聊",
+    "FriendMessage": "私聊",
+    "OtherMessage": "其他"
+  },
+  "session": {
+    "menu": "会话操作",
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "keep": "长期保留",
+    "unkeep": "取消长期保留",
+    "copyUmo": "复制 UMO",
+    "delete": "删除会话",
+    "deleteConfirm": "将删除会话「{name}」及其全部消息，此操作不可撤销。",
+    "deleted": "会话已删除",
+    "copied": "UMO 已复制",
+    "copyFailed": "复制失败",
+    "actionFailed": "操作失败：{error}"
+  },
+  "stream": {
+    "selectSession": "选择会话以查看消息",
+    "empty": "暂无消息",
+    "loadFailed": "消息加载失败",
+    "olderFailed": "更早的消息加载失败",
+    "purged": "更早的消息已清理",
+    "newMessages": "{count} 条新消息",
+    "back": "返回会话列表",
+    "unknownSender": "未知发送者",
+    "quotedMessage": "引用了一条消息"
+  },
+  "segment": {
+    "image": "查看图片",
+    "imageExpired": "图片已过期",
+    "empty": "[空消息]",
+    "unknown": "[消息]",
+    "other": {
+      "Image": "[图片]",
+      "Record": "[语音]",
+      "Video": "[视频]",
+      "File": "[文件]",
+      "Face": "[表情]",
+      "Forward": "[转发消息]",
+      "Node": "[转发消息]",
+      "Nodes": "[转发消息]",
+      "Poke": "[戳一戳]",
+      "Share": "[分享]",
+      "Music": "[音乐]",
+      "Json": "[卡片]",
+      "Location": "[位置]",
+      "Contact": "[名片]",
+      "RPS": "[猜拳]",
+      "Dice": "[骰子]",
+      "Shake": "[窗口抖动]",
+      "ActionRow": "[按钮]",
+      "Button": "[按钮]",
+      "ButtonInteraction": "[按钮]"
+    }
+  },
+  "status": {
+    "sending": "发送中",
+    "failed": "发送失败",
+    "unknown": "发送结果未确认"
+  },
+  "composer": {
+    "placeholder": "输入消息，Enter 发送，Shift + Enter 换行",
+    "send": "发送"
+  },
+  "time": {
+    "yesterday": "昨天"
+  },
+  "actions": {
+    "retry": "重试",
+    "confirm": "确认发送结果",
+    "resend": "重新发送"
+  }
+}

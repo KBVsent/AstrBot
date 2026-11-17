@@ -19,6 +19,7 @@ from astrbot.core.astrbot_config_mgr import AstrBotConfigManager
 from astrbot.core.config import AstrBotConfig
 from astrbot.core.pipeline.scheduler import PipelineScheduler
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.sns_recorder import get_sns_writer
 
 from .platform import AstrMessageEvent
 from .utils.active_event_registry import active_event_registry
@@ -59,6 +60,9 @@ class EventBus:
                 event.trace.record("pipeline_end", status="cancelled")
                 continue
             original_umo = event.unified_msg_origin
+            # The pipeline rewrites the chain in place, so record it before starting it.
+            if (sns_writer := get_sns_writer()) is not None:
+                sns_writer.record_inbound(event)
             conf_info = self.astrbot_config_mgr.get_conf_info(original_umo)
             conf_id = conf_info["id"]
             scheduler = self.pipeline_scheduler_mapping.get(conf_id)
@@ -81,7 +85,7 @@ class EventBus:
                         f"PipelineScheduler not found for id: {conf_id}, event ignored."
                     )
                     continue
-            # 入站日志在 WakingCheckStage 按唤醒情况输出，这里只传配置档名
+            # 指令日志（StarRequestSubStage）显示的配置档名
             event.set_extra("_inbound_log_conf_name", conf_info.get("name") or conf_id)
             task = asyncio.create_task(scheduler.execute(event))
             self._pending_tasks[task] = event

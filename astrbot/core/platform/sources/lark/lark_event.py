@@ -46,7 +46,7 @@ from astrbot.core.utils.media_utils import (
     convert_video_format,
     get_media_duration,
 )
-from astrbot.core.utils.metrics import Metric
+from astrbot.core.utils.stat_recorders import record_platform_send
 
 from .lark_group_info import get_lark_group
 
@@ -1247,9 +1247,7 @@ class LarkMessageEvent(AstrMessageEvent):
             buffer.squash_plain()
             await self.send(buffer)
 
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name)
-        )
+        record_platform_send(self.platform_meta)
         self._has_send_oper = True
 
     async def send_streaming(self, generator, use_fallback: bool = False):
@@ -1268,7 +1266,7 @@ class LarkMessageEvent(AstrMessageEvent):
         done = False
         text_changed = asyncio.Event()
         sender_task = None
-        fallback_used = False  # 回退路径已处理 Metric，避免重复上报
+        fallback_used = False  # 回退路径已计数，避免重复计数
 
         async def _sender_loop() -> None:
             """信号驱动的文本发送循环，有新内容就发，RTT 自然限流。"""
@@ -1300,9 +1298,7 @@ class LarkMessageEvent(AstrMessageEvent):
             if buffer:
                 buffer.squash_plain()
                 await self.send(buffer)
-            asyncio.create_task(
-                Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name)
-            )
+            record_platform_send(self.platform_meta)
             self._has_send_oper = True
 
         async def _flush_and_close_card() -> None:
@@ -1377,18 +1373,12 @@ class LarkMessageEvent(AstrMessageEvent):
         # If no text was produced at all, no card was created
         if card_id is None:
             if not fallback_used:
-                asyncio.create_task(
-                    Metric.upload(
-                        msg_event_tick=1, adapter_name=self.platform_meta.name
-                    )
-                )
+                record_platform_send(self.platform_meta)
                 self._has_send_oper = True
             return
 
         await _flush_and_close_card()
 
         # 内联父类 send_streaming 的副作用
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.platform_meta.name)
-        )
+        record_platform_send(self.platform_meta)
         self._has_send_oper = True

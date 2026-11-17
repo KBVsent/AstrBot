@@ -12,10 +12,13 @@ from astrbot.core.db.po import (
     ChatUIProject,
     CommandConfig,
     CommandConflict,
+    CommandStat,
     ConversationEvent,
     ConversationV3,
     CronJob,
     DashboardTrustedDevice,
+    ImMessage,
+    ImSession,
     Persona,
     PersonaFolder,
     PlatformMessageHistory,
@@ -23,6 +26,7 @@ from astrbot.core.db.po import (
     PlatformStat,
     Preference,
     ProviderStat,
+    SessionActivityStat,
     SessionProjectRelation,
     UmoAlias,
     UmoSender,
@@ -50,6 +54,8 @@ from astrbot.core.utils.astrbot_path import (
 # 主数据库模型类映射
 MAIN_DB_MODELS: dict[str, type[SQLModel]] = {
     "platform_stats": PlatformStat,
+    "command_stats": CommandStat,
+    "session_activity_stats": SessionActivityStat,
     "conversations_v3": ConversationV3,
     "conversation_events": ConversationEvent,
     "provider_stats": ProviderStat,
@@ -69,6 +75,8 @@ MAIN_DB_MODELS: dict[str, type[SQLModel]] = {
     "umo_aliases": UmoAlias,
     "umo_senders": UmoSender,
     "api_keys": ApiKey,
+    "im_sessions": ImSession,
+    "im_messages": ImMessage,
 }
 
 # Device trust must be re-established after restore, never copied from a backup.

@@ -296,7 +296,6 @@ DEFAULT_CONFIG = {
     },
     "wake_prefix": ["/"],
     "log_level": "INFO",
-    "inbound_message_log": "wake_only",
     "log_file_enable": False,
     "log_file_path": "logs/astrbot.log",
     "log_file_max_mb": 20,
@@ -305,6 +304,10 @@ DEFAULT_CONFIG = {
     "trace_db_path": "logs/traces.db",
     "trace_db_max_mb": 80,
     "trace_retention_days": 7,
+    "sns_client": {
+        "enable": True,
+        "retention_days": 30,
+    },
     "pip_install_arg": "",
     "pypi_index_url": "https://mirrors.aliyun.com/pypi/simple/",
     "persona": [],  # deprecated
@@ -320,7 +323,6 @@ DEFAULT_CONFIG = {
     "kb_final_top_k": 5,  # 知识库检索最终返回结果数量
     "kb_agentic_mode": False,
     "disable_builtin_commands": False,
-    "disable_metrics": False,
 }
 
 
@@ -3400,18 +3402,9 @@ CONFIG_METADATA_2 = {
                 "description": "图床后端",
                 "type": "string",
             },
-            "disable_metrics": {
-                "description": "禁用匿名使用统计",
-                "type": "bool",
-                "hint": "禁用后，AstrBot 将不再上传匿名使用统计数据。",
-            },
             "log_level": {
                 "type": "string",
                 "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-            },
-            "inbound_message_log": {
-                "type": "string",
-                "options": ["wake_only", "all"],
             },
             "dashboard.ssl.enable": {"type": "bool"},
             "dashboard.trust_proxy_headers": {"type": "bool"},
@@ -3438,6 +3431,13 @@ CONFIG_METADATA_2 = {
             "trace_db_path": {"type": "string"},
             "trace_db_max_mb": {"type": "int"},
             "trace_retention_days": {"type": "int"},
+            "sns_client": {
+                "type": "object",
+                "items": {
+                    "enable": {"type": "bool"},
+                    "retention_days": {"type": "int"},
+                },
+            },
             "t2i_strategy": {
                 "type": "string",
                 "options": ["remote", "local"],
@@ -5083,13 +5083,6 @@ CONFIG_METADATA_3_SYSTEM = {
                         "hint": "控制台输出日志的级别。",
                         "options": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
                     },
-                    "inbound_message_log": {
-                        "description": "入站消息日志",
-                        "type": "string",
-                        "hint": "仅触发时会将 @、回复、唤醒前缀和匹配指令的消息记录为 INFO，其他消息降为 DEBUG；全部消息会维持所有入站消息为 INFO。",
-                        "options": ["wake_only", "all"],
-                        "labels": ["仅触发时", "全部消息"],
-                    },
                     "dashboard.ssl.enable": {
                         "description": "启用 WebUI HTTPS",
                         "type": "bool",
@@ -5180,6 +5173,16 @@ CONFIG_METADATA_3_SYSTEM = {
                         "description": "追踪保留天数",
                         "type": "int",
                         "hint": "默认 7 天，期限或容量先达到者触发清理。",
+                    },
+                    "sns_client.enable": {
+                        "description": "记录聊天消息",
+                        "type": "bool",
+                        "hint": "记录各平台收发的消息，供 WebUI 消息页查看。",
+                    },
+                    "sns_client.retention_days": {
+                        "description": "消息保留天数",
+                        "type": "int",
+                        "hint": "每天清理一次，0 为不清理；长期保留的会话不受影响。",
                     },
                     "image_host": {
                         "description": "图床后端",

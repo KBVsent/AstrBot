@@ -1,0 +1,89 @@
+{
+  "list": {
+    "search": "セッション名または ID で検索",
+    "platformFilter": "プラットフォームで絞り込み",
+    "allPlatforms": "すべてのプラットフォーム",
+    "empty": "セッションはありません",
+    "emptyHint": "ボットがメッセージを受信または送信すると、セッションがここに表示されます",
+    "filteredEmpty": "条件に一致するセッションはありません",
+    "loadFailed": "セッション一覧を読み込めませんでした",
+    "pinned": "ピン留め済み",
+    "keepForever": "無期限保存"
+  },
+  "types": {
+    "all": "すべて",
+    "GroupMessage": "グループ",
+    "FriendMessage": "個別",
+    "OtherMessage": "その他"
+  },
+  "session": {
+    "menu": "セッションの操作",
+    "pin": "ピン留め",
+    "unpin": "ピン留めを解除",
+    "keep": "無期限保存",
+    "unkeep": "無期限保存を解除",
+    "copyUmo": "UMO をコピー",
+    "delete": "セッションを削除",
+    "deleteConfirm": "セッション「{name}」とそのすべてのメッセージを削除します。この操作は元に戻せません。",
+    "deleted": "セッションを削除しました",
+    "copied": "UMO をコピーしました",
+    "copyFailed": "コピーできませんでした",
+    "actionFailed": "操作に失敗しました：{error}"
+  },
+  "stream": {
+    "selectSession": "メッセージを表示するセッションを選択してください",
+    "empty": "メッセージはありません",
+    "loadFailed": "メッセージを読み込めませんでした",
+    "olderFailed": "以前のメッセージを読み込めませんでした",
+    "purged": "以前のメッセージは削除済みです",
+    "newMessages": "新着メッセージ {count} 件",
+    "back": "セッション一覧に戻る",
+    "unknownSender": "不明な送信者",
+    "quotedMessage": "メッセージを引用"
+  },
+  "segment": {
+    "image": "画像を表示",
+    "imageExpired": "画像の有効期限切れ",
+    "empty": "[空のメッセージ]",
+    "unknown": "[メッセージ]",
+    "other": {
+      "Image": "[画像]",
+      "Record": "[音声]",
+      "Video": "[動画]",
+      "File": "[ファイル]",
+      "Face": "[絵文字]",
+      "Forward": "[転送メッセージ]",
+      "Node": "[転送メッセージ]",
+      "Nodes": "[転送メッセージ]",
+      "Poke": "[つつく]",
+      "Share": "[共有]",
+      "Music": "[音楽]",
+      "Json": "[カード]",
+      "Location": "[位置情報]",
+      "Contact": "[連絡先]",
+      "RPS": "[じゃんけん]",
+      "Dice": "[サイコロ]",
+      "Shake": "[ウィンドウシェイク]",
+      "ActionRow": "[ボタン]",
+      "Button": "[ボタン]",
+      "ButtonInteraction": "[ボタン]"
+    }
+  },
+  "status": {
+    "sending": "送信中",
+    "failed": "送信に失敗しました",
+    "unknown": "送信結果を確認できません"
+  },
+  "composer": {
+    "placeholder": "メッセージを入力（Enter で送信、Shift + Enter で改行）",
+    "send": "送信"
+  },
+  "time": {
+    "yesterday": "昨日"
+  },
+  "actions": {
+    "retry": "再試行",
+    "confirm": "送信結果を確認",
+    "resend": "再送信"
+  }
+}

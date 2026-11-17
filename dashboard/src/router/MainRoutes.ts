@@ -179,7 +179,9 @@ const MainRoutes = {
       redirect: (to: RouteLocationNormalized) => {
         const lastTab = localStorage.getItem('data_last_tab');
         return redirectToDataTab(
-          lastTab && ['Stats', 'Conversation', 'Console', 'Trace'].includes(lastTab) ? lastTab : 'Stats'
+          lastTab && ['Stats', 'Messages', 'Conversation', 'Console', 'Trace'].includes(lastTab)
+            ? lastTab
+            : 'Stats'
         )(to);
       },
       children: [
@@ -188,6 +190,12 @@ const MainRoutes = {
           path: 'statistics',
           component: () => import('@/views/stats/StatsPage.vue'),
           meta: { dataTab: 'statistics' }
+        },
+        {
+          name: 'Messages',
+          path: 'messages',
+          component: () => import('@/views/im/ImPage.vue'),
+          meta: { dataTab: 'messages' }
         },
         {
           name: 'Conversation',

@@ -1,4 +1,5 @@
 import asyncio
+import itertools
 import json
 import sqlite3
 import threading
@@ -9,10 +10,11 @@ from pathlib import Path
 
 from deprecated import deprecated
 from sqlalchemy import CursorResult, Row, bindparam, case, event, literal, not_
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlmodel import col, delete, desc, func, or_, select, text, update
+from sqlmodel import and_, col, delete, desc, func, or_, select, text, update
 
 from astrbot.core.db import BaseDatabase
 from astrbot.core.db.migration.migra_conversation_events import migrate_conversations
@@ -26,6 +28,9 @@ from astrbot.core.db.po import (
     ConversationEvent,
     ConversationV3,
     CronJob,
+    ImMessage,
+    ImMessageWrite,
+    ImSession,
     Persona,
     PersonaFolder,
     PlatformMessageHistory,
@@ -140,10 +145,14 @@ class SQLiteDatabase(BaseDatabase):
         super().__init__()
 
         @event.listens_for(self.engine.sync_engine, "connect")
-        def enable_foreign_keys(connection, _record):
-            """Enforce event ownership and ancestry on every pooled connection."""
+        def configure_connection(connection, _record):
+            """Apply connection-scoped pragmas; foreign keys enforce event ownership and ancestry."""
             cursor = connection.cursor()
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.execute("PRAGMA cache_size=20000")
+            cursor.execute("PRAGMA temp_store=MEMORY")
+            cursor.execute("PRAGMA mmap_size=134217728")
             cursor.close()
 
     async def initialize(self) -> None:
@@ -166,10 +175,6 @@ class SQLiteDatabase(BaseDatabase):
             )
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.execute(text("PRAGMA busy_timeout=30000"))
-            await conn.execute(text("PRAGMA synchronous=NORMAL"))
-            await conn.execute(text("PRAGMA cache_size=20000"))
-            await conn.execute(text("PRAGMA temp_store=MEMORY"))
-            await conn.execute(text("PRAGMA mmap_size=134217728"))
             await conn.execute(text("PRAGMA optimize"))
             # 确保 personas 表有 folder_id、sort_order、skills 列（前向兼容）
             await self._ensure_persona_folder_columns(conn)
@@ -376,16 +381,35 @@ class SQLiteDatabase(BaseDatabase):
         timestamp=None,
     ) -> None:
         """Insert a new platform statistic record."""
+        if timestamp is None:
+            timestamp = datetime.now().replace(minute=0, second=0, microsecond=0)
+        await self.insert_platform_stats_batch(
+            [
+                {
+                    "timestamp": timestamp,
+                    "platform_id": platform_id,
+                    "platform_type": platform_type,
+                    "count": count,
+                }
+            ]
+        )
+
+    async def insert_platform_stats_batch(self, records: list[dict]) -> None:
+        """Upsert many pre-aggregated platform send counts in a single transaction."""
+        if not records:
+            return
+        normalized_records = [
+            {
+                "timestamp": record["timestamp"],
+                "platform_id": record["platform_id"],
+                "platform_type": record["platform_type"],
+                "count": record.get("count", 1),
+            }
+            for record in records
+        ]
         async with self.get_db() as session:
             session: AsyncSession
             async with session.begin():
-                if timestamp is None:
-                    timestamp = datetime.now().replace(
-                        minute=0,
-                        second=0,
-                        microsecond=0,
-                    )
-                current_hour = timestamp
                 await session.execute(
                     text("""
                     INSERT INTO platform_stats (timestamp, platform_id, platform_type, count)
@@ -393,12 +417,7 @@ class SQLiteDatabase(BaseDatabase):
                     ON CONFLICT(timestamp, platform_id, platform_type) DO UPDATE SET
                         count = platform_stats.count + EXCLUDED.count
                     """),
-                    {
-                        "timestamp": current_hour,
-                        "platform_id": platform_id,
-                        "platform_type": platform_type,
-                        "count": count,
-                    },
+                    normalized_records,
                 )
 
     _COMMAND_STATS_UPSERT = """
@@ -2882,7 +2901,19 @@ class SQLiteDatabase(BaseDatabase):
             creator_sender_id: Sender that first caused the UMO to be recorded.
             auto_name: Name discovered from the inbound platform message.
         """
-        now = datetime.now(timezone.utc)
+        statement = self._umo_auto_name_upsert(
+            umo, creator_sender_id, auto_name, datetime.now(timezone.utc)
+        )
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(statement)
+
+    @staticmethod
+    def _umo_auto_name_upsert(
+        umo: str, creator_sender_id: str, auto_name: str, now: datetime
+    ):
+        """Build the upsert that changes only the automatic name of a UMO."""
         statement = sqlite_insert(UmoAlias).values(
             umo=umo,
             creator_sender_id=creator_sender_id,
@@ -2891,7 +2922,7 @@ class SQLiteDatabase(BaseDatabase):
             created_at=now,
             updated_at=now,
         )
-        statement = statement.on_conflict_do_update(
+        return statement.on_conflict_do_update(
             index_elements=[UmoAlias.umo],
             set_={
                 "auto_name": statement.excluded.auto_name,
@@ -2901,10 +2932,6 @@ class SQLiteDatabase(BaseDatabase):
                 statement.excluded.auto_name
             ),
         )
-        async with self.get_db() as session:
-            session: AsyncSession
-            async with session.begin():
-                await session.execute(statement)
 
     async def get_umo_alias(self, umo: str) -> UmoAlias | None:
         """Get alias metadata for one UMO."""
@@ -2944,7 +2971,16 @@ class SQLiteDatabase(BaseDatabase):
         """
         if not sender_id:
             return
-        now = datetime.now(timezone.utc)
+        statement = self._umo_sender_upsert(
+            umo, sender_id, sender_name, datetime.now(timezone.utc)
+        )
+        async with self.get_db() as session:
+            async with session.begin():
+                await session.execute(statement)
+
+    @staticmethod
+    def _umo_sender_upsert(umo: str, sender_id: str, sender_name: str, now: datetime):
+        """Build the upsert that never overwrites a known sender name with an empty one."""
         statement = sqlite_insert(UmoSender).values(
             umo=umo,
             sender_id=sender_id,
@@ -2952,7 +2988,7 @@ class SQLiteDatabase(BaseDatabase):
             created_at=now,
             updated_at=now,
         )
-        statement = statement.on_conflict_do_update(
+        return statement.on_conflict_do_update(
             index_elements=[UmoSender.umo, UmoSender.sender_id],
             set_={"sender_name": statement.excluded.sender_name, "updated_at": now},
             where=(statement.excluded.sender_name != "")
@@ -2960,9 +2996,310 @@ class SQLiteDatabase(BaseDatabase):
                 statement.excluded.sender_name
             ),
         )
+
+    # ====
+    # SNS Client Messages
+    # ====
+
+    async def insert_im_messages(
+        self, writes: list[ImMessageWrite]
+    ) -> list[tuple[ImMessage, ImSession]]:
+        """Insert messages and update their sessions and names in one transaction.
+
+        Args:
+            writes: Queued messages in arrival order.
+
+        Returns:
+            Each inserted message with its session state right after that message.
+        """
+        if not writes:
+            return []
+        now = datetime.now(timezone.utc)
+        results: list[tuple[ImMessage, ImSession]] = []
+        auto_names: dict[str, tuple[str, str]] = {}
+        sender_names: dict[tuple[str, str], str] = {}
         async with self.get_db() as session:
+            session: AsyncSession
             async with session.begin():
-                await session.execute(statement)
+                session.add_all([write.message for write in writes])
+                await session.flush()
+                for write in writes:
+                    message = write.message
+                    inbound = message.direction == "in"
+                    statement = sqlite_insert(ImSession).values(
+                        umo=message.umo,
+                        platform_id=write.platform_id,
+                        message_type=write.message_type,
+                        last_message_id=message.id,
+                        last_preview=write.preview,
+                        last_sender_name=message.sender_name,
+                        last_time=message.created_at,
+                        unread_count=1 if inbound else 0,
+                        pinned=False,
+                        keep_forever=False,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    updates = {
+                        "last_message_id": statement.excluded.last_message_id,
+                        "last_preview": statement.excluded.last_preview,
+                        "last_sender_name": statement.excluded.last_sender_name,
+                        "last_time": statement.excluded.last_time,
+                        "updated_at": now,
+                    }
+                    if inbound:
+                        updates["unread_count"] = col(ImSession.unread_count) + 1
+                    statement = statement.on_conflict_do_update(
+                        index_elements=[ImSession.umo], set_=updates
+                    ).returning(*sa_inspect(ImSession).columns)
+                    row = (await session.execute(statement)).one()
+                    results.append((message, ImSession(**row._mapping)))
+                    if inbound:
+                        if write.session_name:
+                            auto_names[message.umo] = (
+                                message.sender_id,
+                                write.session_name,
+                            )
+                        if message.sender_id:
+                            sender_names[(message.umo, message.sender_id)] = (
+                                message.sender_name
+                            )
+                for umo, (sender_id, name) in auto_names.items():
+                    await session.execute(
+                        self._umo_auto_name_upsert(umo, sender_id, name, now)
+                    )
+                for (umo, sender_id), name in sender_names.items():
+                    await session.execute(
+                        self._umo_sender_upsert(umo, sender_id, name, now)
+                    )
+        return results
+
+    async def purge_im_messages_batch(self, cutoff: datetime, limit: int) -> int:
+        """Delete up to limit messages older than cutoff in one transaction.
+
+        Sessions marked keep_forever are skipped, and every session that lost
+        messages has purged_until raised to cutoff.
+
+        Returns:
+            Number of deleted messages.
+        """
+        kept_umos = select(ImSession.umo).where(col(ImSession.keep_forever).is_(True))
+        expired_ids = (
+            select(ImMessage.id)
+            .where(
+                col(ImMessage.created_at) < cutoff,
+                col(ImMessage.umo).not_in(kept_umos),
+            )
+            .order_by(col(ImMessage.id))
+            .limit(limit)
+        )
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                # One statement selects and deletes, so a concurrent keep_forever
+                # change cannot slip between them.
+                result = await session.execute(
+                    delete(ImMessage)
+                    .where(col(ImMessage.id).in_(expired_ids))
+                    .returning(col(ImMessage.umo))
+                )
+                deleted_umos = list(result.scalars().all())
+                for umos in itertools.batched(set(deleted_umos), 500):
+                    await session.execute(
+                        update(ImSession)
+                        .where(
+                            col(ImSession.umo).in_(umos),
+                            or_(
+                                col(ImSession.purged_until).is_(None),
+                                col(ImSession.purged_until) < cutoff,
+                            ),
+                        )
+                        .values(purged_until=cutoff)
+                    )
+        return len(deleted_umos)
+
+    async def list_im_sessions(
+        self,
+        *,
+        message_type: str | None = None,
+        platform_id: str | None = None,
+        query: str | None = None,
+        after: tuple[bool, datetime, str] | None = None,
+        limit: int = 50,
+    ) -> list[tuple[ImSession, UmoAlias | None]]:
+        """List sessions pinned first, then newest first, with their name records.
+
+        Args:
+            message_type: Exact message type filter.
+            platform_id: Exact platform instance filter.
+            query: Substring of the display name or the session id.
+            after: Sort key (pinned, last_time, umo) of the previous page's last row.
+            limit: Maximum number of rows.
+        """
+        statement = select(ImSession, UmoAlias).outerjoin(
+            UmoAlias, col(UmoAlias.umo) == col(ImSession.umo)
+        )
+        if message_type:
+            statement = statement.where(col(ImSession.message_type) == message_type)
+        if platform_id:
+            statement = statement.where(col(ImSession.platform_id) == platform_id)
+        if query:
+            umo_rest = func.substr(
+                col(ImSession.umo), func.instr(col(ImSession.umo), ":") + 1
+            )
+            session_id = func.substr(umo_rest, func.instr(umo_rest, ":") + 1)
+            # Same precedence as get_umo_display_name, with the session id as fallback.
+            display_name = func.coalesce(
+                func.nullif(func.trim(col(UmoAlias.user_alias)), ""),
+                func.nullif(func.trim(col(UmoAlias.auto_name)), ""),
+                session_id,
+            )
+            statement = statement.where(
+                or_(
+                    display_name.contains(query, autoescape=True),
+                    session_id.contains(query, autoescape=True),
+                )
+            )
+        if after is not None:
+            pinned, last_time, umo = after
+            later_in_group = and_(
+                col(ImSession.pinned).is_(pinned),
+                or_(
+                    col(ImSession.last_time) < last_time,
+                    and_(
+                        col(ImSession.last_time) == last_time,
+                        col(ImSession.umo) < umo,
+                    ),
+                ),
+            )
+            statement = statement.where(
+                or_(col(ImSession.pinned).is_(False), later_in_group)
+                if pinned
+                else later_in_group
+            )
+        statement = statement.order_by(
+            desc(col(ImSession.pinned)),
+            desc(col(ImSession.last_time)),
+            desc(col(ImSession.umo)),
+        ).limit(limit)
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(statement)
+            return [(row[0], row[1]) for row in result.all()]
+
+    async def count_unread_im_sessions(self) -> int:
+        """Count sessions with at least one unread message."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(
+                select(func.count()).where(col(ImSession.unread_count) > 0)
+            )
+            return int(result.scalar_one())
+
+    async def get_im_session(self, umo: str) -> ImSession | None:
+        """Get one SNS session."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            return await session.get(ImSession, umo)
+
+    async def update_im_session(self, umo: str, **values: T.Any) -> ImSession | None:
+        """Set session columns and return the new row, or None when it does not exist."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                result = await session.execute(
+                    update(ImSession)
+                    .where(col(ImSession.umo) == umo)
+                    .values(**values, updated_at=datetime.now(timezone.utc))
+                    .returning(*sa_inspect(ImSession).columns)
+                )
+                row = result.one_or_none()
+        return ImSession(**row._mapping) if row is not None else None
+
+    async def delete_im_session(self, umo: str) -> bool:
+        """Delete a session with all its messages; False when it did not exist."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(
+                    delete(ImMessage).where(col(ImMessage.umo) == umo)
+                )
+                result = await session.execute(
+                    delete(ImSession)
+                    .where(col(ImSession.umo) == umo)
+                    .returning(col(ImSession.umo))
+                )
+                return result.first() is not None
+
+    async def list_im_messages(
+        self,
+        umo: str,
+        *,
+        before_id: int | None = None,
+        after_id: int | None = None,
+        limit: int = 30,
+    ) -> list[ImMessage]:
+        """Return messages of one session in ascending id order.
+
+        With after_id the oldest messages after it are returned; otherwise the
+        newest ones, optionally below before_id.
+        """
+        statement = select(ImMessage).where(col(ImMessage.umo) == umo)
+        if after_id is not None:
+            statement = statement.where(col(ImMessage.id) > after_id).order_by(
+                col(ImMessage.id)
+            )
+        else:
+            if before_id is not None:
+                statement = statement.where(col(ImMessage.id) < before_id)
+            statement = statement.order_by(desc(col(ImMessage.id)))
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(statement.limit(limit))
+            messages = list(result.scalars().all())
+        if after_id is None:
+            messages.reverse()
+        return messages
+
+    async def get_im_message(self, message_id: int) -> ImMessage | None:
+        """Get one SNS message by id."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            return await session.get(ImMessage, message_id)
+
+    async def get_im_message_by_client_id(self, client_id: str) -> ImMessage | None:
+        """Get the WebUI message submitted with this client id."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            result = await session.execute(
+                select(ImMessage).where(col(ImMessage.client_id) == client_id)
+            )
+            return result.scalar_one_or_none()
+
+    async def update_im_message_status(
+        self, message_id: int, status: str, error: str | None
+    ) -> ImMessage | None:
+        """Set a message's delivery status; None when the message is gone."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(
+                    update(ImMessage)
+                    .where(col(ImMessage.id) == message_id)
+                    .values(status=status, error=error)
+                )
+                return await session.get(ImMessage, message_id, populate_existing=True)
+
+    async def fail_interrupted_im_sends(self) -> None:
+        """Mark messages left in sending by a previous process as failed."""
+        async with self.get_db() as session:
+            session: AsyncSession
+            async with session.begin():
+                await session.execute(
+                    update(ImMessage)
+                    .where(col(ImMessage.status) == "sending")
+                    .values(status="failed", error="Interrupted by restart")
+                )
 
     async def get_umo_senders(
         self,

@@ -8,6 +8,7 @@
   "data": "数据与日志",
   "dataTabs": {
     "statistics": "统计",
+    "messages": "消息",
     "conversations": "对话",
     "logs": "日志",
     "trace": "追踪"

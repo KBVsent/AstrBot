@@ -1391,14 +1391,6 @@
         "description": "控制台日志级别",
         "hint": "控制台输出日志的级别。"
       },
-      "inbound_message_log": {
-        "description": "入站消息日志",
-        "hint": "仅触发时会将 @、回复、唤醒前缀和匹配指令的消息记录为 INFO，其他消息降为 DEBUG；全部消息会维持所有入站消息为 INFO。",
-        "labels": [
-          "仅触发时",
-          "全部消息"
-        ]
-      },
       "log_file_enable": {
         "description": "启用文件日志",
         "hint": "在控制台输出的同时，将日志写入文件。"
@@ -1431,6 +1423,16 @@
         "description": "追踪保留天数",
         "hint": "默认 7 天，期限或容量先达到者触发清理。"
       },
+      "sns_client": {
+        "enable": {
+          "description": "记录聊天消息",
+          "hint": "记录各平台收发的消息，供 WebUI 消息页查看。"
+        },
+        "retention_days": {
+          "description": "消息保留天数",
+          "hint": "每天清理一次，0 为不清理；长期保留的会话不受影响。"
+        }
+      },
       "pip_install_arg": {
         "description": "pip 安装额外参数",
         "hint": "安装插件依赖时,会使用 Python 的 pip 工具。这里可以填写额外的参数,如 `--break-system-package` 等。PyPI 镜像的 TLS 证书默认会校验;若使用自签名/私有 CA 镜像,请通过 `--cert <CA 路径>` 指定信任的证书(推荐),或显式添加 `--trusted-host <主机名>`。"
@@ -1442,10 +1444,6 @@
       "callback_api_base": {
         "description": "对外可达的回调接口地址",
         "hint": "外部服务可能会通过 AstrBot 生成的回调链接(如文件下载链接)访问 AstrBot 后端。由于 AstrBot 无法自动判断部署环境中对外可达的主机地址(host),因此需要通过此配置项显式指定外部服务如何访问 AstrBot 的地址。如 [http://localhost:6185](http://localhost:6185),[https://example.com](https://example.com) 等。"
-      },
-      "disable_metrics": {
-        "description": "禁用匿名使用统计",
-        "hint": "禁用后，AstrBot 将不再上传匿名使用统计数据。"
       },
       "dashboard": {
         "trust_proxy_headers": {

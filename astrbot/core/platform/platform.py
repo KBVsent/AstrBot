@@ -1,5 +1,4 @@
 import abc
-import asyncio
 import uuid
 from asyncio import Queue
 from collections.abc import Coroutine
@@ -9,7 +8,7 @@ from enum import Enum
 from typing import Any
 
 from astrbot.core.message.message_event_result import MessageChain
-from astrbot.core.utils.metrics import Metric
+from astrbot.core.utils.stat_recorders import record_platform_send
 
 from .astr_message_event import AstrMessageEvent
 from .astrbot_message import AstrBotMessage
@@ -144,9 +143,7 @@ class Platform(abc.ABC):
 
         异步方法。
         """
-        asyncio.create_task(
-            Metric.upload(msg_event_tick=1, adapter_name=self.meta().name)
-        )
+        record_platform_send(self.meta())
 
     def commit_event(self, event: AstrMessageEvent) -> None:
         """提交一个事件到事件队列。"""

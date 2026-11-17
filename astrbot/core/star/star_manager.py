@@ -41,7 +41,6 @@ from astrbot.core.utils.astrbot_path import (
     get_astrbot_temp_path,
 )
 from astrbot.core.utils.io import remove_dir
-from astrbot.core.utils.metrics import Metric
 from astrbot.core.utils.requirements_utils import (
     MissingRequirementsPlan,
     plan_missing_requirements_install,
@@ -1663,7 +1662,6 @@ class PluginManager:
         Raises:
             Exception: If downloading, validation, or loading fails.
         """
-        asyncio.create_task(Metric.upload(et="install_star", repo=repo_url))
         async with self._pm_lock:
             temp_root = Path(get_astrbot_system_tmp_path())
             temp_root.mkdir(parents=True, exist_ok=True)
@@ -2053,10 +2051,6 @@ class PluginManager:
                 Path(zip_file_path).unlink(missing_ok=True)
             except OSError as exc:
                 logger.warning("Failed to delete the plugin archive: %s", exc)
-            if plugin_info and plugin_info.get("repo"):
-                asyncio.create_task(
-                    Metric.upload(et="install_star_f", repo=plugin_info["repo"])
-                )
             return plugin_info
 
     async def _install_plugin_from_directory(
