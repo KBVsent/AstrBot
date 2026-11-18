@@ -44,6 +44,7 @@
   "segment": {
     "image": "画像を表示",
     "imageExpired": "画像の有効期限切れ",
+    "click": "ボタンを押しました",
     "empty": "[空のメッセージ]",
     "unknown": "[メッセージ]",
     "other": {

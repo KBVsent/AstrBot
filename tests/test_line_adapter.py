@@ -1826,6 +1826,27 @@ async def test_line_native_postback_carries_no_portable_component():
     assert event.get_postback_data() == "third-party=value"
 
 
+@pytest.mark.asyncio
+async def test_line_rich_menu_switch_is_described_only_when_it_failed():
+    adapter = make_adapter()
+    events = [_postback_event("mcmai|r|/b50")]
+    for status in ("SUCCESS", "RICHMENU_ALIAS_ID_NOTFOUND"):
+        switch = _postback_event("mcmai|t|song")
+        switch["postback"]["params"] = {"newRichMenuAliasId": "song", "status": status}
+        events.append(switch)
+    labels = []
+    for raw in events:
+        message = await adapter.convert_message(raw)
+        assert message is not None
+        labels.append(adapter.create_event(message).describe_callback())
+
+    assert labels == [
+        "mcmai|r|/b50",
+        None,
+        "mcmai|t|song (RICHMENU_ALIAS_ID_NOTFOUND)",
+    ]
+
+
 # ------------------------------------------------------------------ 群成员
 
 

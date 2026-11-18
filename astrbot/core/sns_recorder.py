@@ -185,6 +185,8 @@ def preview_text(segments: list[dict[str, Any]]) -> str:
             parts.append(f"[{segment['name']}]")
         elif kind == "Image":
             parts.append("[Image]")
+        elif kind == "Click":
+            parts.append(f"[ButtonInteraction] {segment['text']}")
         elif kind == "At":
             parts.append("@" + (segment["name"] or segment["target"]))
     return _clip(" ".join(parts))
@@ -243,20 +245,25 @@ class SnsMessageWriter:
             event.set_extra(_RECORDED_EXTRA, True)
             umo = event.unified_msg_origin
             event.set_extra(SNS_UMO_EXTRA, umo)
-            chain = event.get_messages()
             sender_id = str(event.get_sender_id() or "")
+            self_id = str(event.get_self_id() or "")
             if (
                 event.get_platform_name() == "webchat"
                 or event.event_kind != "message"
-                or event.is_callback_event()
-                or not chain
-                or (sender_id and sender_id == str(event.get_self_id() or ""))
+                or (sender_id and sender_id == self_id)
             ):
                 return
-            content = serialize_chain(chain, event.get_platform_name(), self._temp_root)
+            if event.is_callback_event():
+                label = event.describe_callback()
+                if label is None:
+                    return
+                content = [{"type": "Click", "text": label[:300]}]
+            else:
+                content = serialize_chain(
+                    event.get_messages(), event.get_platform_name(), self._temp_root
+                )
             if not content:
                 return
-            self_id = str(event.get_self_id() or "")
             for segment in content:
                 # Adapters that mention by id alone would show the bot as a number.
                 if (

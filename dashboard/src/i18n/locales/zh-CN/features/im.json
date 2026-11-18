@@ -44,6 +44,7 @@
   "segment": {
     "image": "查看图片",
     "imageExpired": "图片已过期",
+    "click": "点击了按钮",
     "empty": "[空消息]",
     "unknown": "[消息]",
     "other": {

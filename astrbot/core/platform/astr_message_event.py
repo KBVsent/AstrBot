@@ -403,6 +403,20 @@ class AstrMessageEvent(abc.ABC):
         interaction = self.get_button_interaction()
         return interaction.callback_data if interaction is not None else None
 
+    def describe_callback(self) -> str | None:
+        """Identify a callback in logs and the SNS client.
+
+        Returns None for non-callbacks and for callbacks that only report a
+        change the client made on its own, which are not shown.
+        """
+        interaction = self.get_button_interaction()
+        if interaction is not None:
+            # The callback data of a portable button is an opaque token.
+            return interaction.action_id
+        if not self.is_callback_event():
+            return None
+        return self.get_callback_data() or ""
+
     async def send_typing(self) -> None:
         """发送输入中状态。
 

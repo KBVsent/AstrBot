@@ -1,10 +1,12 @@
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from astrbot.core.pipeline import context_utils
 from astrbot.core.pipeline.process_stage.method import star_request
+from astrbot.core.star.filter.callback import CallbackFilter
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.regex import RegexFilter
@@ -56,6 +58,44 @@ async def test_message_handler_trace_category(monkeypatch, event_filter, categor
         assert record.kwargs["plugin_display_name"] == "Test Plugin"
         assert "module" not in record.kwargs
     assert extras == {"activated_handlers": [handler], "handlers_parsed_params": {}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "logged"),
+    [("mcmai|r|/b50", ["-> [按钮] mcmai|r|/b50 (test_plugin)"]), (None, [])],
+)
+async def test_button_handler_logs_the_press(monkeypatch, label, logged):
+    handler = SimpleNamespace(
+        handler=AsyncMock(return_value=None),
+        handler_name="on_callback",
+        handler_full_name="test_plugin.on_callback",
+        handler_module_path="test_plugin",
+        event_type=EventType.AdapterMessageEvent,
+        event_filters=[CallbackFilter("mcmai|")],
+        extras_configs={},
+    )
+    monkeypatch.setitem(
+        star_request.star_map,
+        "test_plugin",
+        SimpleNamespace(name="test_plugin", display_name="Test Plugin"),
+    )
+    lines = []
+    monkeypatch.setattr(
+        star_request.logger, "info", lambda line, **_: lines.append(line)
+    )
+    extras = {"activated_handlers": [handler], "handlers_parsed_params": {}}
+    event = MagicMock()
+    event.get_extra.side_effect = extras.get
+    event.is_stopped.return_value = False
+    event.is_private_chat.return_value = True
+    event.get_sender_name.return_value = "Alice"
+    event.describe_callback.return_value = label
+
+    async for _ in star_request.StarRequestSubStage().process(event):
+        pass
+
+    assert [line[line.index("-> ") :] for line in lines] == logged
 
 
 @pytest.mark.asyncio
@@ -117,7 +157,7 @@ async def test_nested_command_details_preserve_handler_identity(monkeypatch):
             event_filters=[event_filter],
             desc=f"Description for {command}",
         )
-        event_filter.handler_md = handler
+        event_filter.handler_md = cast(Any, handler)
         handlers[handler.handler_full_name] = handler
         group.add_sub_command_filter(event_filter)
     monkeypatch.setattr(

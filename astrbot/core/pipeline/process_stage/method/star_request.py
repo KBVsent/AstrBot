@@ -9,6 +9,8 @@ from typing import Any
 from astrbot.core import logger
 from astrbot.core.message.message_event_result import MessageEventResult
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.star.filter.button_action import ButtonActionFilter
+from astrbot.core.star.filter.callback import CallbackFilter
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.filter.regex import RegexFilter
@@ -17,7 +19,6 @@ from astrbot.core.star.star_handler import EventType, StarHandlerMetadata
 from astrbot.core.utils.stat_recorders import command_stat_recorder
 
 from ...context import PipelineContext, call_event_hook, call_handler
-from ...stage import Stage
 
 
 def _resolve_trigger(handler: StarHandlerMetadata) -> tuple[str, str] | None:
@@ -55,18 +56,8 @@ def _command_args(handler: StarHandlerMetadata, message_str: str) -> str:
     return text
 
 
-def _log_trigger(
-    event: AstrMessageEvent,
-    handler: StarHandlerMetadata,
-    plugin_name: str,
-    command_name: str,
-    trigger_type: str,
-) -> None:
-    """Log the command or regex handler about to run.
-
-    Regex handlers log only their function name, since their patterns may
-    match secrets such as tokens.
-    """
+def _log_trigger(event: AstrMessageEvent, action: str, plugin_name: str) -> None:
+    """Log the command, regex or button handler about to run."""
     if event.is_private_chat():
         chat_tag = "[私聊]"
     else:
@@ -80,10 +71,6 @@ def _log_trigger(
     sender_name = event.get_sender_name()
     sender_id = event.get_sender_id()
     sender = f"{sender_name}/{sender_id}" if sender_name else sender_id
-    if trigger_type == "regex":
-        action = command_name
-    else:
-        action = f"/{command_name} {_command_args(handler, event.get_message_str())}"
     conf_name = event.get_extra("_inbound_log_conf_name", "unknown")
     # category lets the WebUI log page hide user chat.
     logger.info(
@@ -93,7 +80,7 @@ def _log_trigger(
     )
 
 
-class StarRequestSubStage(Stage):
+class StarRequestSubStage:
     async def initialize(self, ctx: PipelineContext) -> None:
         self.prompt_prefix = ctx.astrbot_config["provider_settings"]["prompt_prefix"]
         self.identifier = ctx.astrbot_config["provider_settings"]["identifier"]
@@ -122,11 +109,18 @@ class StarRequestSubStage(Stage):
                     f"Cannot find plugin for given handler module path: {handler.handler_module_path}",
                 )
                 continue
-            # 指令 / 正则处理器：打日志并计入触发统计（内存聚合，周期批量落库）
+            # 指令 / 正则处理器打日志并计入触发统计（内存聚合，周期批量落库）；按钮回调只打日志
             trigger = _resolve_trigger(handler)
             if trigger:
                 command_name, trigger_type = trigger
-                _log_trigger(event, handler, md.name or "", command_name, trigger_type)
+                # A regex may match secrets such as tokens, so only its handler is named.
+                action = (
+                    command_name
+                    if trigger_type == "regex"
+                    else f"/{command_name} "
+                    f"{_command_args(handler, event.get_message_str())}"
+                )
+                _log_trigger(event, action, md.name or "")
                 command_stat_recorder.record(
                     timestamp=datetime.now().replace(minute=0, second=0, microsecond=0),
                     platform_id=event.get_platform_id(),
@@ -134,6 +128,14 @@ class StarRequestSubStage(Stage):
                     plugin_name=md.name or "",
                     command_name=command_name,
                 )
+            elif (
+                any(
+                    isinstance(event_filter, CallbackFilter | ButtonActionFilter)
+                    for event_filter in handler.event_filters
+                )
+                and (label := event.describe_callback()) is not None
+            ):
+                _log_trigger(event, f"[按钮] {label}", md.name or "")
 
             # Match the component categories used by the plugin detail page.
             handler_category = (

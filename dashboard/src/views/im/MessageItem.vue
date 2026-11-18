@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, watch } from "vue";
-import { CircleAlert, CircleHelp, ImageOff } from "@lucide/vue";
+import { CircleAlert, CircleHelp, ImageOff, MousePointerClick } from "@lucide/vue";
 import { useI18n, useModuleI18n } from "@/i18n/composables";
 import { snsApi, type ImSegment } from "./api";
 import { formatFullTime, localizeMarkers, markerLabel } from "./format";
@@ -164,6 +164,11 @@ function otherLabel(segment: ImSegment): string {
             <span v-else-if="segment.type === 'Image'" class="im-image im-image--expired">
               <ImageOff :size="16" aria-hidden="true" />
               <span>{{ tm("segment.imageExpired") }}</span>
+            </span>
+            <span v-else-if="segment.type === 'Click'" class="im-click">
+              <MousePointerClick :size="14" aria-hidden="true" />
+              <span>{{ tm("segment.click") }}</span>
+              <span v-if="segment.text" class="im-click__data">{{ segment.text }}</span>
             </span>
             <span v-else class="im-other">{{ otherLabel(segment) }}</span>
           </template>
@@ -347,6 +352,21 @@ function otherLabel(segment: ImSegment): string {
 
 .im-other {
   color: var(--im-muted);
+}
+
+.im-click {
+  align-items: center;
+  color: var(--im-muted);
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+}
+
+.im-click__data {
+  color: rgb(var(--v-theme-on-surface));
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82em;
+  overflow-wrap: anywhere;
 }
 
 .im-image {

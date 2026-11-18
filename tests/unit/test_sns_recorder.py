@@ -123,7 +123,7 @@ def test_serialize_chain_keeps_names_and_classifies_images(tmp_path):
     [
         "webchat",
         "wakeup",
-        "callback",
+        "client_change",
         "empty",
         "self",
         "disabled",
@@ -133,8 +133,6 @@ async def test_inbound_filter_skips_non_user_messages(case):
     db = _fake_db()
     writer = SnsMessageWriter(db, {"sns_client": {"enable": case != "disabled"}})
     chain = [Plain("hi")]
-    if case == "callback":
-        chain = [ButtonInteraction(action_id="a", interaction_id="i")]
     event = _event(
         [] if case == "empty" else chain,
         platform="webchat" if case == "webchat" else "aiocqhttp",
@@ -142,11 +140,29 @@ async def test_inbound_filter_skips_non_user_messages(case):
     )
     if case == "wakeup":
         event.event_kind = "agent_wakeup"
+    if case == "client_change":
+        event.is_callback_event = lambda: True
+        event.describe_callback = lambda: None
 
     writer.record_inbound(event)
     await writer.drain()
 
     assert db.writes == []
+
+
+@pytest.mark.asyncio
+async def test_button_press_is_recorded_as_a_click():
+    db = _fake_db()
+    writer = SnsMessageWriter(db, {})
+
+    writer.record_inbound(
+        _event([ButtonInteraction(action_id="approve", interaction_id="i")])
+    )
+    await writer.drain()
+
+    [write] = db.writes
+    assert write.message.content == [{"type": "Click", "text": "approve"}]
+    assert write.preview == "[ButtonInteraction] approve"
 
 
 @pytest.mark.asyncio

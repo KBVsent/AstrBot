@@ -24,6 +24,7 @@ export type ImSegment =
   | { type: 'At'; target: string; name: string }
   | { type: 'Reply'; id: string; sender_name: string; text: string }
   | { type: 'Image'; available: boolean }
+  | { type: 'Click'; text: string }
   | { type: 'Other'; name: string; text: string };
 
 export type ImMessageStatus = 'ok' | 'sending' | 'failed';

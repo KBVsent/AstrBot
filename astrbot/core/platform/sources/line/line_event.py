@@ -785,6 +785,16 @@ class LineMessageEvent(AstrMessageEvent):
     def get_callback_data(self) -> str | None:
         return self.get_postback_data()
 
+    def describe_callback(self) -> str | None:
+        params = self.get_postback_params()
+        if "newRichMenuAliasId" not in params:
+            return super().describe_callback()
+        status = params.get("status")
+        # The client switches the rich menu itself; a successful switch only reports it.
+        if status == "SUCCESS":
+            return None
+        return f"{self.get_postback_data()} ({status})"
+
     def _postback_payload(self) -> dict[str, Any]:
         raw = self.message_obj.raw_message
         if not isinstance(raw, dict):

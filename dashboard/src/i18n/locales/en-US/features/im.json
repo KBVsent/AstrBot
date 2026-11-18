@@ -44,6 +44,7 @@
   "segment": {
     "image": "View image",
     "imageExpired": "Image expired",
+    "click": "Pressed a button",
     "empty": "[Empty message]",
     "unknown": "[Message]",
     "other": {
