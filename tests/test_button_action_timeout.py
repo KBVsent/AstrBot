@@ -1,5 +1,6 @@
 import json
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -20,7 +21,7 @@ from astrbot.core.platform.sources.dingtalk import dingtalk_adapter
 from astrbot.core.platform.sources.discord.components import action_rows_to_discord_view
 from astrbot.core.platform.sources.kook.kook_event import KookEvent
 from astrbot.core.platform.sources.lark.lark_event import LarkMessageEvent
-from astrbot.core.platform.sources.line.line_event import LineMessageEvent
+from astrbot.core.platform.sources.line.line_event import _component_to_message_object
 from astrbot.core.platform.sources.mattermost.client import MattermostClient
 from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
     QQOfficialMessageEvent,
@@ -91,29 +92,32 @@ async def test_platform_callback_honors_row_deadline(
         action_timeout=action_timeout,
     )
     chain = MessageChain([row])
+    token: Any
 
     if platform == "telegram":
         token = (
-            TelegramPlatformEvent._build_inline_keyboard([row])
+            cast(Any, TelegramPlatformEvent._build_inline_keyboard([row]))
             .inline_keyboard[0][0]
             .callback_data
         )
     elif platform == "discord":
-        token = action_rows_to_discord_view([row]).children[0].custom_id
+        token = cast(Any, action_rows_to_discord_view([row]).children[0]).custom_id
     elif platform == "qq":
-        token = QQOfficialMessageEvent._parse_keyboard(chain)["content"]["rows"][0][
-            "buttons"
-        ][0]["action"]["data"]
+        token = cast(Any, QQOfficialMessageEvent._parse_keyboard(chain))["content"][
+            "rows"
+        ][0]["buttons"][0]["action"]["data"]
     elif platform == "lark":
         card = LarkMessageEvent._build_button_card([row])
         token = card["body"]["elements"][0]["columns"][0]["elements"][0]["behaviors"][
             0
         ]["value"]["astrbot_callback"]
     elif platform == "line":
-        message = await LineMessageEvent._component_to_message_object(row)
+        message = cast(Any, await _component_to_message_object(row, None))
         token = message["template"]["actions"][0]["data"]
     elif platform == "slack":
-        block = await SlackMessageEvent._from_segment_to_slack_block(row, AsyncMock())
+        block = cast(
+            Any, await SlackMessageEvent._from_segment_to_slack_block(row, AsyncMock())
+        )
         token = block["elements"][0]["value"]
     elif platform == "mattermost":
         client = MattermostClient(
@@ -148,7 +152,11 @@ async def test_platform_callback_honors_row_deadline(
         else:
             client = SimpleNamespace(kf_message=MagicMock(spec=WeChatKFMessage))
         event = WecomPlatformEvent(
-            "", message, PlatformMetadata("wecom", "WeCom", "test"), "alice", client
+            "",
+            message,
+            PlatformMetadata("wecom", "WeCom", "test"),
+            "alice",
+            cast(Any, client),
         )
         await event.send(chain)
         if platform == "wecom":
@@ -158,7 +166,7 @@ async def test_platform_callback_honors_row_deadline(
         else:
             token = client.kf_message.send_msgmenu.call_args.args[3][0]["click"]["id"]
     elif platform == "wecom_ai":
-        token = build_wecom_button_card([row])["button_list"][0]["key"]
+        token = cast(Any, build_wecom_button_card([row]))["button_list"][0]["key"]
     elif platform == "dingtalk":
         session = MagicMock()
         session.__aenter__.return_value = session

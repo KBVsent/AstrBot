@@ -106,7 +106,6 @@ def make_adapter() -> LinePlatformAdapter:
         {},
         committed,
     )
-    adapter.committed_events = committed
 
     async def fake_display_name(*_args) -> str:
         return "Display Name"
@@ -212,7 +211,7 @@ async def test_duplicate_event_is_skipped_once_accepted():
 
 
 @pytest.mark.asyncio
-async def test_terminate_counts_in_flight_events():
+async def test_terminate_counts_in_flight_events(monkeypatch):
     """关闭超时的「未处理」条数要包含 worker 已取出但没做完的事件。"""
     adapter = make_adapter()
     started = asyncio.Event()
@@ -225,10 +224,10 @@ async def test_terminate_counts_in_flight_events():
     adapter._process_event = slow_process  # type: ignore[method-assign]
     import astrbot.core.platform.sources.line.line_adapter as adapter_module
 
-    original_warning = adapter_module.logger.warning
-    original_timeout = adapter_module._TERMINATE_TIMEOUT_SECONDS
-    adapter_module.logger.warning = lambda *args: warnings.append(args)
-    adapter_module._TERMINATE_TIMEOUT_SECONDS = 0.1
+    monkeypatch.setattr(
+        adapter_module.logger, "warning", lambda *args: warnings.append(args)
+    )
+    monkeypatch.setattr(adapter_module, "_TERMINATE_TIMEOUT_SECONDS", 0.1)
 
     run_task = asyncio.create_task(adapter.run())
     try:
@@ -237,8 +236,6 @@ async def test_terminate_counts_in_flight_events():
         await asyncio.wait_for(started.wait(), timeout=1)
         await adapter.terminate()
     finally:
-        adapter_module.logger.warning = original_warning
-        adapter_module._TERMINATE_TIMEOUT_SECONDS = original_timeout
         await run_task
 
     timeout_logs = [w for w in warnings if "terminate timed out" in str(w[0])]
@@ -525,7 +522,7 @@ async def test_postback_uses_raw_message():
     assert abm.message_str == ""
 
     await adapter.handle_msg(abm)
-    astr_event = adapter.committed_events.get_nowait()
+    astr_event = adapter._event_queue.get_nowait()
     assert astr_event.is_postback() is True
     assert astr_event.get_postback_data() == "action=buy&id=1"
     assert astr_event.get_postback_params() == {"date": "2026-08-03"}
@@ -584,7 +581,7 @@ async def test_message_event_is_not_postback():
     abm = await adapter.convert_message(text_event("e1"))
     assert abm is not None
     await adapter.handle_msg(abm)
-    astr_event = adapter.committed_events.get_nowait()
+    astr_event = adapter._event_queue.get_nowait()
     assert astr_event.is_postback() is False
     assert astr_event.get_postback_data() is None
     assert astr_event.call_llm is False
@@ -1302,7 +1299,7 @@ async def test_terminate_before_run_leaves_no_orphan_workers():
     assert not [
         task
         for task in asyncio.all_tasks()
-        if "_event_worker" in task.get_coro().__qualname__
+        if "_event_worker" in getattr(task.get_coro(), "__qualname__", "")
     ]
 
 
@@ -1407,7 +1404,7 @@ async def test_handle_msg_sets_user_locale_extra():
     abm = await adapter.convert_message(text_event("e-locale"))
     assert abm is not None
     await adapter.handle_msg(abm)
-    event = adapter.committed_events.get_nowait()
+    event = adapter._event_queue.get_nowait()
     assert event.get_extra("user_locale") == "zh-Hant"
 
     # 取不到语言时不写 extra，让上层走各自的平台默认。
@@ -1420,7 +1417,7 @@ async def test_handle_msg_sets_user_locale_extra():
     abm = await adapter.convert_message(text_event("e-locale-miss"))
     assert abm is not None
     await adapter.handle_msg(abm)
-    event = adapter.committed_events.get_nowait()
+    event = adapter._event_queue.get_nowait()
     assert event.get_extra("user_locale") is None
 
 
@@ -1465,7 +1462,7 @@ async def test_follow_event_reaches_raw_hook_but_not_pipeline():
         "mode": "active",
     }
     # 不是 message / postback，不该产生 pipeline 事件。
-    assert adapter.committed_events.empty()
+    assert adapter._event_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -1481,7 +1478,7 @@ async def test_message_event_also_reaches_raw_hook():
     adapter.emit_raw_platform_event = fake_emit  # type: ignore[method-assign]
     await adapter._process_event(text_event("e-raw-msg"))
     assert seen == ["message"]
-    assert adapter.committed_events.qsize() == 1
+    assert adapter._event_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -1494,7 +1491,7 @@ async def test_raw_hook_stop_does_not_block_message_pipeline():
 
     adapter.emit_raw_platform_event = stopping_emit  # type: ignore[method-assign]
     await adapter._process_event(text_event("e-raw-stop"))
-    assert adapter.committed_events.qsize() == 1
+    assert adapter._event_queue.qsize() == 1
 
 
 @pytest.mark.asyncio
@@ -1506,7 +1503,7 @@ async def test_raw_hook_failure_does_not_break_event():
 
     adapter.emit_raw_platform_event = exploding_emit  # type: ignore[method-assign]
     await adapter._process_event(text_event("e-raw-boom"))
-    assert adapter.committed_events.qsize() == 1
+    assert adapter._event_queue.qsize() == 1
 
 
 # -------------------------------------------------------------- Rich Menu
