@@ -111,6 +111,11 @@ def serialize_chain(
         "ActionRow": "[按钮]",
         "Button": "[按钮]",
         "ButtonInteraction": "[按钮]",
+        "discord_view": "[按钮]",
+        "qqc_keyboard": "[按钮]",
+        "qqc_button": "[按钮]",
+        "discord_embed": "[卡片]",
+        "line_flex": "[卡片]",
     }
     segments: list[dict[str, Any]] = []
     for component in chain:

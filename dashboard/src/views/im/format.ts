@@ -53,5 +53,5 @@ export function markerLabel(labels: unknown, name: string): string | undefined {
 
 /** Localize the backend's [Name] markers; a name without a label may be user text and stays. */
 export function localizeMarkers(text: string, labels: unknown): string {
-  return text.replace(/\[([A-Za-z]+)\]/g, (marker, name: string) => markerLabel(labels, name) ?? marker);
+  return text.replace(/\[([A-Za-z_]+)\]/g, (marker, name: string) => markerLabel(labels, name) ?? marker);
 }

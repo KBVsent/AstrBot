@@ -66,7 +66,12 @@
       "Shake": "[Window shake]",
       "ActionRow": "[Buttons]",
       "Button": "[Buttons]",
-      "ButtonInteraction": "[Buttons]"
+      "ButtonInteraction": "[Buttons]",
+      "discord_view": "[Buttons]",
+      "qqc_keyboard": "[Buttons]",
+      "qqc_button": "[Buttons]",
+      "discord_embed": "[Card]",
+      "line_flex": "[Card]"
     }
   },
   "status": {
