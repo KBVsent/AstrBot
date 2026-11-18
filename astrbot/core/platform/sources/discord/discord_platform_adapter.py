@@ -115,35 +115,20 @@ class DiscordPlatformAdapter(Platform):
         session: MessageSesion,
         message_chain: MessageChain,
     ) -> None:
-        """通过会话发送消息"""
+        """通过会话发送消息；发不出去时抛出异常。"""
         if self.client.user is None:
-            logger.error(
-                "[Discord] Client is not ready (self.client.user is None); message send skipped"
-            )
-            return
+            raise RuntimeError("Discord client is not ready")
 
         # 创建一个 message_obj 以便在 event 中使用
         message_obj = AstrBotMessage()
         if "_" in session.session_id:
             session.session_id = session.session_id.split("_")[1]
-        channel_id_str = session.session_id
-        channel = None
-        try:
-            channel_id = int(channel_id_str)
-            channel = self.client.get_channel(channel_id)
-        except (ValueError, TypeError):
-            logger.warning(f"[Discord] Invalid channel ID format: {channel_id_str}")
-
-        if channel:
-            message_obj.type = self._get_message_type(channel)
-            message_obj.group_id = self._get_channel_id(channel)
-            self._attach_group(message_obj, channel)
-        else:
-            logger.error(
-                f"[Discord] Proactive send failed: cannot resolve channel {channel_id_str} "
-                "(bot may not be in the guild, or the channel does not exist)."
-            )
-            return
+        channel_id = int(session.session_id)
+        # A DM channel is cached only after a message in it arrives since startup.
+        channel = self.client.get_channel(
+            channel_id
+        ) or await self.client.fetch_channel(channel_id)
+        self._set_channel(message_obj, channel)
 
         message_obj.message_str = message_chain.get_plain_text()
         message_obj.sender = MessageMember(
@@ -157,7 +142,9 @@ class DiscordPlatformAdapter(Platform):
         message_obj.raw_message = None
 
         temp_event = self.create_event(message_obj)
-        await temp_event.send(message_chain)
+        # The event logs and swallows send errors.
+        if await temp_event.send(message_chain) is None:
+            raise RuntimeError(f"Discord did not send the message to {channel_id}")
         await super().send_by_session(session, message_chain)
 
     @override
@@ -271,6 +258,18 @@ class DiscordPlatformAdapter(Platform):
         """根据 channel 对象获取ID"""
         return str(getattr(channel, "id", None))
 
+    def _set_channel(
+        self,
+        abm: AstrBotMessage,
+        channel: Messageable | GuildChannel | PrivateChannel,
+        guild_id: int | None = None,
+    ) -> None:
+        """Fill the message type and, for a guild channel only, the group."""
+        abm.type = self._get_message_type(channel, guild_id)
+        if abm.type == MessageType.GROUP_MESSAGE:
+            abm.group_id = self._get_channel_id(channel)
+            self._attach_group(abm, channel)
+
     def _attach_group(
         self,
         abm: AstrBotMessage,
@@ -352,9 +351,7 @@ class DiscordPlatformAdapter(Platform):
                     content = content.replace(f"<@&{role.id}>", "")
 
         abm = AstrBotMessage()
-        abm.type = self._get_message_type(message.channel)
-        abm.group_id = self._get_channel_id(message.channel)
-        self._attach_group(abm, message.channel)
+        self._set_channel(abm, message.channel)
         # 指令文本不含任何用户 mention，避免雪花 ID 污染位置参数
         abm.message_str = re.sub(
             r"\s{2,}", " ", re.sub(r"<@!?\d+>", "", content)
@@ -385,16 +382,15 @@ class DiscordPlatformAdapter(Platform):
 
         abm = AstrBotMessage()
         if channel is not None:
-            abm.type = self._get_message_type(channel, interaction.guild_id)
-            abm.group_id = self._get_channel_id(channel)
-            self._attach_group(abm, channel)
+            self._set_channel(abm, channel, interaction.guild_id)
         else:
             abm.type = (
                 MessageType.GROUP_MESSAGE
                 if interaction.guild_id is not None
                 else MessageType.FRIEND_MESSAGE
             )
-            abm.group_id = str(interaction.channel_id)
+            if abm.type == MessageType.GROUP_MESSAGE:
+                abm.group_id = str(interaction.channel_id)
 
         # 交互不靠文本路由（处理器读 custom_id），message_str/message 均留空——避免触发命令匹配
         abm.message_str = ""
@@ -1462,9 +1458,7 @@ class DiscordPlatformAdapter(Platform):
             channel = ctx.channel
             abm = AstrBotMessage()
             if channel is not None:
-                abm.type = self._get_message_type(channel, ctx.guild_id)
-                abm.group_id = self._get_channel_id(channel)
-                self._attach_group(abm, channel)
+                self._set_channel(abm, channel, ctx.guild_id)
             else:
                 # 防守式兜底：channel 取不到时，仍能根据 guild_id/channel_id 推断会话信息
                 abm.type = (

@@ -24,6 +24,8 @@ from astrbot.api.message_components import (
 )
 from astrbot.api.platform import Group, MessageType
 from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.platform import platform as platform_module
+from astrbot.core.platform.astr_message_event import MessageSesion
 from astrbot.core.platform.button_interaction import (
     decode_button_callback,
     encode_button_callback,
@@ -86,7 +88,7 @@ async def test_discord_reply_body_reaches_model_request(source):
 
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
     quoted = Mock(
         spec=discord.Message,
         id=41,
@@ -114,10 +116,14 @@ async def test_discord_reply_body_reaches_model_request(source):
 
     abm = await adapter.convert_message({"message": message})
     req = ProviderRequest(prompt=abm.message_str)
-    await append_quoted_content(SimpleNamespace(message_obj=abm), req, "", Mock())
+    await append_quoted_content(
+        cast(Any, SimpleNamespace(message_obj=abm)), req, "", Mock()
+    )
 
     assert req.prompt == "What is the quoted code?"
-    quoted_text = "\n".join(part.text for part in req.extra_user_content_parts)
+    quoted_text = "\n".join(
+        getattr(part, "text", "") for part in req.extra_user_content_parts
+    )
     assert "@bot TEST_CODE 1008" in quoted_text
     assert quoted.author.display_name in quoted_text
     reply = next(comp for comp in abm.message if isinstance(comp, Reply))
@@ -132,7 +138,7 @@ async def test_discord_reply_body_reaches_model_request(source):
 async def test_discord_quote_keeps_its_attachments_and_names_mentions():
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
     bot = SimpleNamespace(id=1, display_name="Cain-Test")
     photo = SimpleNamespace(
         content_type="image/jpeg", filename="a.jpg", url="https://cdn.example/a.jpg"
@@ -183,7 +189,7 @@ async def test_discord_unavailable_reply_preserves_current_message(case):
     """
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
     reference = SimpleNamespace(message_id=41, resolved=None, cached_message=None)
     errors = {
         "http_error": discord.Forbidden(
@@ -197,7 +203,7 @@ async def test_discord_unavailable_reply_preserves_current_message(case):
         id=123, guild=None, fetch_message=AsyncMock(side_effect=errors.get(case))
     )
     if case == "deleted":
-        reference.resolved = discord.DeletedReferencedMessage(reference)
+        reference.resolved = discord.DeletedReferencedMessage(cast(Any, reference))
     message = SimpleNamespace(
         id=42,
         type=discord.MessageType.default
@@ -235,7 +241,7 @@ async def test_discord_filters_self_messages(allow_bot_messages, author_id, is_b
         is_bot: Whether the sender is a bot.
     """
     client = DiscordBotClient(token="test", allow_bot_messages=allow_bot_messages)
-    client._connection.user = SimpleNamespace(id=1)
+    cast(Any, client._connection).user = SimpleNamespace(id=1)
     client.on_message_received = AsyncMock()
     message = SimpleNamespace(
         id=42,
@@ -249,7 +255,7 @@ async def test_discord_filters_self_messages(allow_bot_messages, author_id, is_b
         mentions=[],
     )
 
-    await client.on_message(message)
+    await client.on_message(cast(Any, message))
 
     if author_id == 1 or (is_bot and not allow_bot_messages):
         client.on_message_received.assert_not_awaited()
@@ -286,10 +292,10 @@ async def test_discord_sends_video_attachment(
     event = DiscordPlatformEvent.__new__(DiscordPlatformEvent)
     event.interaction_followup_webhook = None
     event._prefer_edit_origin = False
-    event.message_obj = SimpleNamespace(raw_message=None)
+    event.message_obj = cast(Any, SimpleNamespace(raw_message=None))
     event._get_channel = AsyncMock(return_value=channel)
     monkeypatch.setattr(discord_platform_event.AstrMessageEvent, "send", AsyncMock())
-    chain = [Plain("Video test"), component] if with_text else [component]
+    chain: list[Any] = [Plain("Video test"), component] if with_text else [component]
 
     await event.send(MessageChain(chain=chain))
 
@@ -338,7 +344,7 @@ async def test_discord_video_url_attachment_filename(
     assert len(files) == 1
     try:
         assert files[0].filename == expected_name
-        assert files[0].fp.name == str(video_path)
+        assert getattr(files[0].fp, "name") == str(video_path)
     finally:
         files[0].close()
 
@@ -347,7 +353,7 @@ async def test_discord_video_url_attachment_filename(
 async def test_discord_group_carries_cached_guild_metadata():
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
     guild = SimpleNamespace(
         name="AstrBot",
         icon=SimpleNamespace(url="https://cdn.discordapp.com/guild.png"),
@@ -377,14 +383,51 @@ async def test_discord_group_carries_cached_guild_metadata():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("delivered", [True, False])
+async def test_discord_proactive_send_fetches_an_uncached_dm(monkeypatch, delivered):
+    adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
+    adapter.bot_self_id = "1"
+    fetch_channel = AsyncMock(return_value=SimpleNamespace(id=123, guild=None))
+    adapter.client = cast(
+        Any,
+        SimpleNamespace(
+            user=SimpleNamespace(display_name="bot"),
+            get_channel=lambda _channel_id: None,
+            fetch_channel=fetch_channel,
+        ),
+    )
+    events = []
+
+    def create_event(message_obj):
+        sent_id = "9" if delivered else None
+        events.append(SimpleNamespace(message_obj=message_obj))
+        events[-1].send = AsyncMock(return_value=sent_id)
+        return events[-1]
+
+    monkeypatch.setattr(adapter, "create_event", create_event)
+    monkeypatch.setattr(adapter, "meta", lambda: None)
+    monkeypatch.setattr(platform_module, "record_platform_send", lambda _meta: None)
+    session = MessageSesion.from_str("dc:FriendMessage:123")
+
+    if delivered:
+        await adapter.send_by_session(session, MessageChain().message("hi"))
+    else:
+        with pytest.raises(RuntimeError):
+            await adapter.send_by_session(session, MessageChain().message("hi"))
+
+    fetch_channel.assert_awaited_once_with(123)
+    message_obj = events[0].message_obj
+    assert (message_obj.type, message_obj.group_id) == (MessageType.FRIEND_MESSAGE, "")
+
+
+@pytest.mark.asyncio
 async def test_discord_get_group_returns_none_for_private_message():
     event = DiscordPlatformEvent.__new__(DiscordPlatformEvent)
-    event.message_obj = SimpleNamespace(
-        type=MessageType.FRIEND_MESSAGE,
-        group=None,
-        group_id="123",
+    event.message_obj = cast(
+        Any,
+        SimpleNamespace(type=MessageType.FRIEND_MESSAGE, group=None, group_id=""),
     )
-    event.client = SimpleNamespace()
+    event.client = cast(Any, SimpleNamespace())
 
     assert await event.get_group() is None
 
@@ -530,12 +573,13 @@ async def test_discord_renders_common_action_rows():
     assert reference_message_id is None
     assert view is not None
     assert len(view.children) == 2
-    action_id, data = decode_button_callback(view.children[0].custom_id)
+    action, link = cast(list[Any], view.children)
+    action_id, data = decode_button_callback(action.custom_id)
     assert action_id == "approve"
     assert data == {"order_id": 7}
-    assert view.children[0].style == discord_platform_event.discord.ButtonStyle.success
-    assert view.children[1].url == "https://example.com/docs"
-    assert view.children[1].style == discord_platform_event.discord.ButtonStyle.link
+    assert action.style == discord_platform_event.discord.ButtonStyle.success
+    assert link.url == "https://example.com/docs"
+    assert link.style == discord_platform_event.discord.ButtonStyle.link
 
 
 @pytest.mark.asyncio
@@ -658,7 +702,7 @@ async def test_late_interaction_logs_age_at_callback(monkeypatch):
 @pytest.mark.asyncio
 async def test_discord_client_routes_component_clicks_to_the_adapter():
     client = DiscordBotClient.__new__(DiscordBotClient)
-    client._connection = SimpleNamespace(user=SimpleNamespace(id=99))
+    client._connection = cast(Any, SimpleNamespace(user=SimpleNamespace(id=99)))
     client.on_interaction_received = AsyncMock()
     process_application_commands = AsyncMock()
     setattr(client, "process_application_commands", process_application_commands)
@@ -674,7 +718,7 @@ async def test_discord_client_routes_component_clicks_to_the_adapter():
         guild_id=321,
     )
 
-    await client.on_interaction(interaction)
+    await client.on_interaction(cast(Any, interaction))
 
     process_application_commands.assert_not_awaited()
     client.on_interaction_received.assert_awaited_once()

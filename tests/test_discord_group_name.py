@@ -6,14 +6,15 @@
 
 - 服务器频道：group_name 填频道名（与 group_id 存的 channel_id 严格对应），
   服务器名另走事件 extras 的 guild_name。
-- 没有 name 的 channel（私聊的 DMChannel、缓存未命中时的 PartialMessageable）不能
-  把 group 清掉 —— group_id 在私聊下仍是 DM 频道 id，那是既有行为。
+- 私聊（DMChannel，以及没有 guild 而被判成私聊的 PartialMessageable）没有 group，
+  get_group_id() 为空，与基类约定一致。
 - group_owner 取服务器所有者，不能误取 Thread 自带的 owner_id（那是帖子创建者）。
 - get_group()：当前会话复用入站对象；传别的 channel_id 走本地频道缓存，命中不了
   返回 None 且不打接口。
 """
 
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -28,7 +29,7 @@ from astrbot.core.platform.sources.discord.discord_platform_event import (
 def _make_adapter() -> DiscordPlatformAdapter:
     adapter = DiscordPlatformAdapter.__new__(DiscordPlatformAdapter)
     adapter.bot_self_id = "1"
-    adapter.client = SimpleNamespace(user=SimpleNamespace(id=1))
+    adapter.client = cast(Any, SimpleNamespace(user=SimpleNamespace(id=1)))
     return adapter
 
 
@@ -71,14 +72,11 @@ async def test_guild_channel_message_fills_channel_name():
 
 
 @pytest.mark.asyncio
-async def test_dm_channel_keeps_existing_group_id_without_a_name():
-    """DMChannel 没有 name；不能因为取不到名字就把 group 清成 None。"""
+async def test_dm_has_no_group():
     channel = SimpleNamespace(id=456, guild=None)
     abm = await _make_adapter().convert_message({"message": _make_message(channel)})
 
-    assert abm.group_id == "456"
-    assert abm.group is not None
-    assert abm.group.group_name is None
+    assert (abm.group_id, abm.group, abm.session_id) == ("", None, "456")
 
 
 @pytest.mark.asyncio
@@ -86,14 +84,12 @@ async def test_partial_messageable_is_treated_like_a_nameless_channel():
     """频道缓存未命中时 pycord 给的是 PartialMessageable：只有 id，没有 name。
 
     见 ConnectionState._get_guild_channel 末尾的 `channel or PartialMessageable(...)`。
-    此时 message.guild 也是 None，回填必须整体跳过而不是崩掉。
+    此时 message.guild 也是 None，按私聊处理而不是崩掉。
     """
     channel = SimpleNamespace(id=789)  # 连 guild 属性都没有
     abm = await _make_adapter().convert_message({"message": _make_message(channel)})
 
-    assert abm.group_id == "789"
-    assert abm.group is not None
-    assert abm.group.group_name is None
+    assert (abm.group_id, abm.group) == ("", None)
 
 
 @pytest.mark.asyncio
@@ -179,18 +175,14 @@ async def test_dm_does_not_write_guild_extras():
 
 @pytest.mark.asyncio
 async def test_get_group_returns_none_in_private_chat():
-    """基类约定私聊返回 None，不能把 group_id setter 造出的 Group 桩透出去。"""
+    """基类约定私聊返回 None。"""
     adapter = _make_adapter()
     adapter.config = {"id": "discord-test"}
     channel = SimpleNamespace(id=456, guild=None)
     abm = await adapter.convert_message({"message": _make_message(channel)})
 
-    # 入站对象本身非空（group_id 在私聊下仍是 DM 频道 id），但 get_group 必须返回 None。
-    assert abm.group is not None
     event = adapter.create_event(abm)
     assert await event.get_group() is None
-    # 私聊里 get_group_id() 就是 DM 频道 id，显式传它与不传是同一种情况。
-    assert await event.get_group(event.get_group_id()) is None
 
 
 @pytest.mark.asyncio
@@ -208,7 +200,7 @@ async def test_get_group_reuses_inbound_object_and_resolves_other_channels():
         lookups.append(channel_id)
         return other if channel_id == 456 else None
 
-    adapter.client.get_channel = get_channel
+    cast(Any, adapter.client).get_channel = get_channel
     event = adapter.create_event(abm)
 
     # 当前会话直接复用入站对象，不查频道缓存。
