@@ -199,7 +199,11 @@ def _qqofficial_retry(max_attempts: int = 5, *, log_retries: bool = True):
         ),
         stop=stop_after_attempt(max_attempts),
         wait=wait_exponential(multiplier=2, min=2, max=30),
-        before_sleep=before_sleep_log(logger, logging.WARNING) if log_retries else None,
+        before_sleep=(
+            before_sleep_log(cast(logging.Logger, logger), logging.WARNING)
+            if log_retries
+            else None
+        ),
         reraise=True,
     )
 
@@ -706,6 +710,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             file_name,
             keyboard_payload,
             reference_message_id,
+            text_content,
         ) = await QQOfficialMessageEvent._parse_to_qqofficial(
             message_to_send,
             convert_image_to_markdown=convert_img,
@@ -718,6 +723,12 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             ),
         )
 
+        is_interaction = isinstance(source, botpy.interaction.Interaction)
+        is_guild = isinstance(
+            source, botpy.message.Message | botpy.message.DirectMessage
+        ) or (is_interaction and source.chat_type == 0)
+        content_text = plain_text if is_guild else text_content
+
         # C2C 流式仅用于文本分片，富媒体时降级为普通发送，避免平台侧流式校验报错。
         if stream and (
             image_base64 or record_file_path or video_file_source or file_source
@@ -726,7 +737,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             stream = None
 
         if (
-            not plain_text
+            not (content_text if use_md is False else plain_text)
             and not image_base64
             and not image_path
             and not record_file_path
@@ -734,27 +745,28 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             and not file_source
             and not keyboard_payload
         ):
+            if plain_text:
+                logger.warning(
+                    "[QQOfficial] 纯文本无法艾特，只含无昵称艾特的消息未发送。"
+                )
             return None
 
         # QQ C2C 流式 API 说明：
         # - 开始/中间分片（state=1）：增量追加内容，不需要 \n（加了会导致强制换行）
         # - 最终分片（state=10）：结束流，content 必须以 \n 结尾（QQ API 要求）
-        if (
-            stream
-            and stream.get("state") == 10
-            and plain_text
-            and not plain_text.endswith("\n")
-        ):
-            plain_text = plain_text + "\n"
+        if stream and stream.get("state") == 10:
+            if plain_text and not plain_text.endswith("\n"):
+                plain_text += "\n"
+            if content_text and not content_text.endswith("\n"):
+                content_text += "\n"
 
         # keyboard 要求 markdown content 非空，补零宽占位
         if keyboard_payload and not plain_text:
-            plain_text = self.EMPTY_MARKDOWN_PLACEHOLDER
+            plain_text = content_text = self.EMPTY_MARKDOWN_PLACEHOLDER
 
-        is_interaction = isinstance(source, botpy.interaction.Interaction)
         if use_md is False:
             payload: dict = {
-                "content": plain_text,
+                "content": content_text,
                 "msg_type": 0,
             }
         else:
@@ -833,7 +845,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                     payload["media"] = media
                     payload["msg_type"] = 7
                     payload.pop("markdown", None)
-                    payload["content"] = plain_text or None
+                    payload["content"] = content_text or None
                 if record_file_path:  # group record msg
                     media = await self.upload_group_and_c2c_media(
                         record_file_path,
@@ -844,7 +856,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 if video_file_source:
                     media = await self.upload_group_and_c2c_media(
                         video_file_source,
@@ -855,7 +867,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 if file_source:
                     media = await self.upload_group_and_c2c_media(
                         file_source,
@@ -867,14 +879,14 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 ret = await self._send_with_markdown_fallback(
                     send_func=lambda retry_payload: self.bot.api.post_group_message(
                         group_openid=source.group_openid,  # type: ignore
                         **retry_payload,
                     ),
                     payload=payload,
-                    plain_text=plain_text,
+                    plain_text=content_text,
                     stream=stream,
                 )
 
@@ -893,7 +905,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                     payload["media"] = media
                     payload["msg_type"] = 7
                     payload.pop("markdown", None)
-                    payload["content"] = plain_text or None
+                    payload["content"] = content_text or None
                 if record_file_path:  # c2c record
                     media = await self.upload_group_and_c2c_media(
                         record_file_path,
@@ -904,7 +916,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 if video_file_source:
                     media = await self.upload_group_and_c2c_media(
                         video_file_source,
@@ -915,7 +927,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 if file_source:
                     media = await self.upload_group_and_c2c_media(
                         file_source,
@@ -927,7 +939,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         payload["media"] = media
                         payload["msg_type"] = 7
                         payload.pop("markdown", None)
-                        payload["content"] = plain_text or None
+                        payload["content"] = content_text or None
                 if stream:
                     ret = await self._send_with_markdown_fallback(
                         send_func=lambda retry_payload: self.post_c2c_message(
@@ -936,7 +948,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                             stream=stream,
                         ),
                         payload=payload,
-                        plain_text=plain_text,
+                        plain_text=content_text,
                         stream=stream,
                     )
                 else:
@@ -946,7 +958,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                             **retry_payload,
                         ),
                         payload=payload,
-                        plain_text=plain_text,
+                        plain_text=content_text,
                         stream=stream,
                     )
                 logger.debug(f"Message sent to C2C: {ret}")
@@ -965,7 +977,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         **retry_payload,
                     ),
                     payload=payload,
-                    plain_text=plain_text,
+                    plain_text=content_text,
                     stream=stream,
                 )
 
@@ -980,14 +992,14 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                         **retry_payload,
                     ),
                     payload=payload,
-                    plain_text=plain_text,
+                    plain_text=content_text,
                     stream=stream,
                 )
 
             case botpy.interaction.Interaction():
                 # 按钮点击回调的回复：按 chat_type 路由，0=频道 / 1=群 / 2=C2C
                 chat_type = source.chat_type
-                media_sources = {
+                media_sources: dict[str, Any] = {
                     "image_base64": image_base64,
                     "record_file_path": record_file_path,
                     "video_file_source": video_file_source,
@@ -997,7 +1009,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 if chat_type == 1 and source.group_openid:
                     await self._attach_v2_media(
                         payload,
-                        plain_text,
+                        content_text,
                         **media_sources,
                         group_openid=source.group_openid,
                     )
@@ -1007,13 +1019,13 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                             **retry_payload,
                         ),
                         payload=payload,
-                        plain_text=plain_text,
+                        plain_text=content_text,
                         stream=stream,
                     )
                 elif chat_type == 2 and source.user_openid:
                     await self._attach_v2_media(
                         payload,
-                        plain_text,
+                        content_text,
                         **media_sources,
                         openid=source.user_openid,
                     )
@@ -1023,7 +1035,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                             **retry_payload,
                         ),
                         payload=payload,
-                        plain_text=plain_text,
+                        plain_text=content_text,
                         stream=stream,
                     )
                 elif chat_type == 0 and source.channel_id:
@@ -1040,7 +1052,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                             **retry_payload,
                         ),
                         payload=guild_payload,
-                        plain_text=plain_text,
+                        plain_text=content_text,
                         stream=stream,
                     )
                 else:
@@ -1078,15 +1090,15 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             media = await self.upload_group_and_c2c_image(
                 image_base64, self.IMAGE_FILE_TYPE, **target
             )
-        for source, file_type, extra in (
-            (record_file_path, self.VOICE_FILE_TYPE, {}),
-            (video_file_source, self.VIDEO_FILE_TYPE, {}),
-            (file_source, self.FILE_FILE_TYPE, {"file_name": file_name}),
+        for source, file_type, name in (
+            (record_file_path, self.VOICE_FILE_TYPE, None),
+            (video_file_source, self.VIDEO_FILE_TYPE, None),
+            (file_source, self.FILE_FILE_TYPE, file_name),
         ):
             if source:
                 media = (
                     await self.upload_group_and_c2c_media(
-                        source, file_type, **extra, **target
+                        source, file_type, False, name, **target
                     )
                     or media
                 )
@@ -1342,7 +1354,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 file_path=local_file,
                 file_type=file_type,
                 file_name=file_name or local_file.name,
-                group_openid=group_openid,
+                group_openid=cast(str, group_openid),
                 srv_send_msg=srv_send_msg,
             )
 
@@ -1570,9 +1582,12 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         Returns:
             (plain_text, image_base64, image_file_path, record_file_path,
              video_file_source, file_source, file_name, keyboard_payload,
-             reference_message_id)
+             reference_message_id, text_content)
+            text_content 是群与 C2C 纯文本 content 用的版本：纯文本里艾特标签会原样
+            显示，At 改写成 @昵称，没有昵称就省略。
         """
         plain_text = ""
+        text_content = ""
         image_base64 = None  # only one img supported for msg_type=7 path
         image_file_path = None
         record_file_path = None
@@ -1585,10 +1600,12 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         for i in message.chain:
             if isinstance(i, Plain):
                 plain_text += i.text
+                text_content += i.text
             elif isinstance(i, At):
                 mention_id = str(i.qq) if i.qq else ""
                 if mention_id and mention_id != "all":
                     plain_text += f'<qqbot-at-user id="{mention_id}" />'
+                    text_content += f"@{i.name}" if i.name else ""
             elif isinstance(i, Reply):
                 # 引用回复：取被引用消息 ID，实际填充在 _post_send_one
                 reference_message_id = str(i.id) if i.id is not None else None
@@ -1604,6 +1621,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                     )
                     if fragment is not None:
                         plain_text += fragment
+                        text_content += fragment
                         continue
                     # 失败时回退到 msg_type=7 路径
                     logger.warning(
@@ -1670,7 +1688,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 action_rows = [
                     row for row in message.chain if isinstance(row, ActionRow)
                 ]
-                plain_text = next(
+                plain_text = text_content = next(
                     (row.fallback_text for row in action_rows if row.fallback_text), ""
                 ) or " / ".join(
                     button.label for row in action_rows for button in row.buttons
@@ -1686,4 +1704,5 @@ class QQOfficialMessageEvent(AstrMessageEvent):
             file_name,
             keyboard_payload,
             reference_message_id,
+            text_content,
         )

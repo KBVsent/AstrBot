@@ -5,6 +5,7 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import botpy
+import botpy.errors
 import botpy.message
 import pytest
 from botpy import ConnectionSession
@@ -19,6 +20,7 @@ from astrbot.core.pipeline.respond.stage import RespondStage
 from astrbot.core.pipeline.result_decorate.stage import ResultDecorateStage
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
+from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.platform.sources.qqofficial import qqofficial_message_event
 from astrbot.core.platform.sources.qqofficial.qqofficial_message_event import (
     QQOfficialMessageEvent,
@@ -86,7 +88,7 @@ def _dispatch_group_message(payload: dict) -> tuple[str, botpy.message.GroupMess
         connect=lambda: None,
         dispatch=lambda event, message: dispatched.append((event, message)),
         loop=asyncio.get_event_loop(),
-        api=None,
+        api=cast(Any, None),
     )
     connection.parser["group_message_create"](payload)
     return dispatched[0]
@@ -172,6 +174,7 @@ async def test_parse_group_message_create_quoted_context():
     assert isinstance(reply, Reply)
     assert reply.id == "quoted-1"
     assert reply.message_str == "quoted text"
+    assert reply.chain is not None
     assert isinstance(reply.chain[0], Plain)
     assert reply.chain[0].text == "quoted text"
     assert isinstance(reply.chain[1], Image)
@@ -263,7 +266,7 @@ async def test_parse_to_qqofficial_ignores_empty_at_component(qq: str | None):
 @pytest.mark.asyncio
 async def test_legacy_group_at_path_forces_bot_mention_when_mentions_missing():
     message = botpy.message.GroupMessage(
-        None,
+        cast(Any, None),
         "event-legacy",
         _make_group_payload(content="legacy text", mentions=[])["d"],
     )
@@ -358,16 +361,21 @@ async def test_get_group_uses_authenticated_client_for_ws_and_webhook(use_webhoo
             "group_member_num": 42,
         }
     )
-    adapter.client.api = SimpleNamespace(_http=SimpleNamespace(request=request))
+    adapter.client.api = cast(
+        Any, SimpleNamespace(_http=SimpleNamespace(request=request))
+    )
+    assert abm.group is not None
     abm.group = await resolve_group(adapter.client, abm.group_id, abm.group.group_name)
     event = adapter.create_event(abm)
 
     group = await event.get_group()
 
+    assert group is not None
     assert group is abm.group
     assert group.group_id == "group-1"
     assert group.group_name == "API Group"
     assert group.member_count == 42
+    assert request.await_args is not None
     route = request.await_args.args[0]
     assert route.method == "GET"
     assert route.path == "/v2/groups/{group_openid}/info"
@@ -389,17 +397,19 @@ async def test_get_group_keeps_incoming_metadata_when_group_info_api_fails():
             _http=SimpleNamespace(request=AsyncMock(side_effect=PermissionError))
         )
     )
+    assert abm.group is not None
     abm.group = await resolve_group(cast(Any, bot), abm.group_id, abm.group.group_name)
     event = QQOfficialMessageEvent(
         abm.message_str,
         abm,
-        SimpleNamespace(name="qq_official", id="qq-official-test"),
+        PlatformMetadata(name="qq_official", description="", id="qq-official-test"),
         abm.session_id,
         cast(Any, bot),
     )
 
     group = await event.get_group()
 
+    assert group is not None
     assert group is abm.group
     assert group.group_id == "group-1"
     assert group.group_name == "Incoming Group"
@@ -438,7 +448,9 @@ async def test_group_name_is_cached_before_event_creation(
         return {"group_name": "API Group", "group_member_num": 42}
 
     request = AsyncMock(side_effect=fetch)
-    adapter.client.api = SimpleNamespace(_http=SimpleNamespace(request=request))
+    adapter.client.api = cast(
+        Any, SimpleNamespace(_http=SimpleNamespace(request=request))
+    )
     events = []
     create_event = adapter.create_event
 
@@ -510,7 +522,7 @@ async def test_get_group_loads_channel_and_parent_guild_metadata():
     event = QQOfficialMessageEvent(
         abm.message_str,
         abm,
-        SimpleNamespace(name="qq_official", id="qq-official-test"),
+        PlatformMetadata(name="qq_official", description="", id="qq-official-test"),
         abm.session_id,
         cast(Any, SimpleNamespace(api=api)),
     )
@@ -520,6 +532,7 @@ async def test_get_group_loads_channel_and_parent_guild_metadata():
 
     group = await event.get_group()
 
+    assert group is not None
     assert group.group_id == "channel-1"
     assert group.group_name == "API Channel"
     assert group.group_avatar == "https://example.com/guild.png"
@@ -542,10 +555,11 @@ async def test_ws_group_send_by_session_without_cached_msg_id_omits_msg_id():
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -553,8 +567,8 @@ async def test_ws_group_send_by_session_without_cached_msg_id_omits_msg_id():
         MessageChain(chain=[Plain("proactive hello")]),
     )
 
-    adapter.client.api.post_group_message.assert_awaited_once()
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    api.post_group_message.assert_awaited_once()
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["group_openid"] == "group-1"
     assert kwargs["markdown"]["content"] == "proactive hello"
     assert kwargs["msg_type"] == 2
@@ -577,10 +591,11 @@ async def test_ws_group_send_by_session_with_cached_msg_id_still_omits_msg_id():
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-2"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
     adapter._session_last_message_id["group-1"] = "stale-msg-id"
 
@@ -589,8 +604,8 @@ async def test_ws_group_send_by_session_with_cached_msg_id_still_omits_msg_id():
         MessageChain(chain=[Plain("proactive with cache")]),
     )
 
-    adapter.client.api.post_group_message.assert_awaited_once()
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    api.post_group_message.assert_awaited_once()
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["group_openid"] == "group-1"
     assert kwargs["markdown"]["content"] == "proactive with cache"
     assert kwargs["msg_type"] == 2
@@ -599,35 +614,72 @@ async def test_ws_group_send_by_session_with_cached_msg_id_still_omits_msg_id():
     assert "msg_seq" in kwargs
 
 
+async def _send_plain_text_to_group(chain: list, path: str) -> AsyncMock:
+    """Send chain with markdown off as a reply or proactively; returns the group post mock."""
+    post = AsyncMock(return_value={"id": "sent"})
+    message = MessageChain(chain=chain, use_markdown_=False)
+    if path == "proactive":
+        adapter = QQOfficialPlatformAdapter(
+            {
+                "id": "qq-official-test",
+                "appid": "123",
+                "secret": "secret",
+                "enable_group_c2c": True,
+                "enable_guild_direct_message": False,
+            },
+            {},
+            asyncio.Queue(),
+        )
+        adapter.client.api = cast(Any, SimpleNamespace(post_group_message=post))
+        adapter._session_scene["group-1"] = "group"
+        await adapter.send_by_session(
+            MessageSession("qq_official", MessageType.GROUP_MESSAGE, "group-1"),
+            message,
+        )
+        return post
+    _, raw = _dispatch_group_message(_make_group_payload())
+    abm = await QQOfficialPlatformAdapter._parse_from_qqofficial(
+        raw,
+        MessageType.GROUP_MESSAGE,
+    )
+    abm.session_id = abm.group_id
+    event = QQOfficialMessageEvent(
+        abm.message_str,
+        abm,
+        PlatformMetadata(name="qq_official", description="", id="qq-official-test"),
+        abm.session_id,
+        cast(Any, SimpleNamespace(api=SimpleNamespace(post_group_message=post))),
+    )
+    event.send_buffer = message
+    await event._post_send_one(message)
+    return post
+
+
 @pytest.mark.asyncio
-async def test_ws_group_send_by_session_with_at_uses_text_chain_markup():
-    adapter = QQOfficialPlatformAdapter(
-        {
-            "id": "qq-official-test",
-            "appid": "123",
-            "secret": "secret",
-            "enable_group_c2c": True,
-            "enable_guild_direct_message": False,
-        },
-        {},
-        asyncio.Queue(),
-    )
-    adapter.client.api = SimpleNamespace(
-        post_group_message=AsyncMock(return_value={"id": "sent-at"}),
-        post_message=AsyncMock(),
-    )
-    adapter._session_scene["group-1"] = "group"
-    chain = MessageChain(chain=[At(qq="member-1"), Plain(" hello")])
-    chain.use_markdown(False)
-
-    await adapter.send_by_session(
-        MessageSession("qq_official", MessageType.GROUP_MESSAGE, "group-1"),
-        chain,
+@pytest.mark.parametrize("path", ["reply", "proactive"])
+async def test_plain_text_group_message_writes_only_at_components_by_name(path):
+    # Plain text shows mention tags verbatim; text typed as a tag stays as typed.
+    post = await _send_plain_text_to_group(
+        [
+            At(qq="member-1", name="Alice"),
+            Plain(" hello"),
+            At(qq="m2"),
+            Plain(' <qqbot-at-user id="member-1" />!'),
+        ],
+        path,
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
-    assert kwargs["content"] == '<qqbot-at-user id="member-1" /> hello'
+    kwargs = cast(Any, post.await_args).kwargs
+    assert kwargs["content"] == '@Alice hello <qqbot-at-user id="member-1" />!'
     assert "markdown" not in kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["reply", "proactive"])
+async def test_plain_text_group_message_of_unnamed_mentions_is_not_sent(path):
+    post = await _send_plain_text_to_group([At(qq="member-1")], path)
+
+    post.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -646,7 +698,7 @@ async def test_media_upload_propagates_qq_api_error(monkeypatch):
 
     with pytest.raises(botpy.errors.ServerError, match="413 Request Entity Too Large"):
         await QQOfficialMessageEvent.upload_group_and_c2c_media(
-            send_helper,
+            cast(Any, send_helper),
             "https://example.com/large.bin",
             QQOfficialMessageEvent.FILE_FILE_TYPE,
             group_openid="group-1",
@@ -664,10 +716,11 @@ async def test_webhook_group_send_by_session_without_cached_msg_id_omits_msg_id(
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -675,8 +728,8 @@ async def test_webhook_group_send_by_session_without_cached_msg_id_omits_msg_id(
         MessageChain(chain=[Plain("webhook proactive hello")]),
     )
 
-    adapter.client.api.post_group_message.assert_awaited_once()
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    api.post_group_message.assert_awaited_once()
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["group_openid"] == "group-1"
     assert kwargs["markdown"]["content"] == "webhook proactive hello"
     assert kwargs["msg_type"] == 2
@@ -795,10 +848,11 @@ async def test_ws_group_send_by_session_use_markdown_false_sends_content():
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -806,7 +860,7 @@ async def test_ws_group_send_by_session_use_markdown_false_sends_content():
         MessageChain(chain=[Plain("plain content")], use_markdown_=False),
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["content"] == "plain content"
     assert "markdown" not in kwargs
     assert "msg_type" not in kwargs
@@ -825,14 +879,20 @@ async def test_ws_group_send_by_session_with_media_uses_msg_type_7(monkeypatch):
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-media"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     async def fake_parse(message_chain, **kwargs):
-        return ("caption", "fake-base64", None, None, None, None, None, None, None)
+        return (
+            "caption",
+            "fake-base64",
+            *(None,) * 7,
+            "caption",
+        )
 
     async def fake_upload_image(self_, image_base64, file_type, **kwargs):
         return {"file_uuid": "u-1", "file_info": "i-1", "ttl": 0}
@@ -847,7 +907,7 @@ async def test_ws_group_send_by_session_with_media_uses_msg_type_7(monkeypatch):
         MessageChain(chain=[Plain("caption")]),
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["msg_type"] == 7
     assert "markdown" not in kwargs
     assert kwargs["content"] == "caption"
@@ -868,7 +928,9 @@ async def test_friend_send_by_session_renders_markdown():
         asyncio.Queue(),
     )
     request = AsyncMock(return_value={"id": "sent-c2c"})
-    adapter.client.api = SimpleNamespace(_http=SimpleNamespace(request=request))
+    adapter.client.api = cast(
+        Any, SimpleNamespace(_http=SimpleNamespace(request=request))
+    )
 
     await adapter.send_by_session(
         MessageSession("qq_official", MessageType.FRIEND_MESSAGE, "user-1"),
@@ -876,6 +938,7 @@ async def test_friend_send_by_session_renders_markdown():
     )
 
     request.assert_awaited_once()
+    assert request.await_args is not None
     json_payload = request.await_args.kwargs["json"]
     assert json_payload["markdown"]["content"] == "hello friend"
     assert json_payload["msg_type"] == 2
@@ -894,10 +957,11 @@ async def test_guild_channel_send_by_session_drops_msg_type():
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(),
         post_message=AsyncMock(return_value={"id": "sent-guild"}),
     )
+    adapter.client.api = api
     adapter._session_scene["guild-channel-1"] = "channel"
     adapter._session_last_message_id["guild-channel-1"] = "cached-msg-id"
 
@@ -906,8 +970,8 @@ async def test_guild_channel_send_by_session_drops_msg_type():
         MessageChain(chain=[Plain("guild text")]),
     )
 
-    adapter.client.api.post_message.assert_awaited_once()
-    kwargs = adapter.client.api.post_message.await_args.kwargs
+    api.post_message.assert_awaited_once()
+    kwargs = api.post_message.await_args.kwargs
     assert kwargs["channel_id"] == "guild-channel-1"
     assert kwargs["markdown"]["content"] == "guild text"
     assert "msg_type" not in kwargs
@@ -927,6 +991,7 @@ def test_split_message_chain_by_media_preserves_use_markdown():
     )
     chunks = QQOfficialMessageEvent._split_message_chain_by_media(chain)
     assert len(chunks) == 2
+    assert isinstance(chunks[0].chain[0], Plain)
     assert chunks[0].chain[0].text == "text before"
     assert all(chunk.use_markdown_ is False for chunk in chunks)
 
@@ -953,10 +1018,11 @@ async def test_group_send_by_session_falls_back_to_content_when_markdown_rejecte
             {"id": "sent-fallback"},
         ]
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=posting,
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -991,10 +1057,11 @@ async def test_ws_group_send_by_session_use_markdown_config_false_sends_content(
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -1002,7 +1069,7 @@ async def test_ws_group_send_by_session_use_markdown_config_false_sends_content(
         MessageChain(chain=[Plain("plain content")]),
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["content"] == "plain content"
     assert "markdown" not in kwargs
     assert "msg_type" not in kwargs
@@ -1024,10 +1091,11 @@ async def test_ws_group_send_by_session_explicit_use_markdown_overrides_config()
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -1035,7 +1103,7 @@ async def test_ws_group_send_by_session_explicit_use_markdown_overrides_config()
         MessageChain(chain=[Plain("forced markdown")], use_markdown_=True),
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["markdown"]["content"] == "forced markdown"
     assert kwargs["msg_type"] == 2
     assert "content" not in kwargs
@@ -1055,10 +1123,11 @@ async def test_webhook_send_by_session_use_markdown_config_false_sends_content()
         {},
         asyncio.Queue(),
     )
-    adapter.client.api = SimpleNamespace(
+    api: Any = SimpleNamespace(
         post_group_message=AsyncMock(return_value={"id": "sent-1"}),
         post_message=AsyncMock(),
     )
+    adapter.client.api = api
     adapter._session_scene["group-1"] = "group"
 
     await adapter.send_by_session(
@@ -1066,7 +1135,7 @@ async def test_webhook_send_by_session_use_markdown_config_false_sends_content()
         MessageChain(chain=[Plain("webhook plain content")]),
     )
 
-    kwargs = adapter.client.api.post_group_message.await_args.kwargs
+    kwargs = api.post_group_message.await_args.kwargs
     assert kwargs["content"] == "webhook plain content"
     assert "markdown" not in kwargs
     assert "msg_type" not in kwargs
