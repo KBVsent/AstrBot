@@ -18,6 +18,7 @@ from astrbot.core.message.message_event_result import (
 )
 from astrbot.core.pipeline.respond.stage import RespondStage
 from astrbot.core.pipeline.result_decorate.stage import ResultDecorateStage
+from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
 from astrbot.core.platform.platform_metadata import PlatformMetadata
@@ -942,6 +943,63 @@ async def test_friend_send_by_session_renders_markdown():
     json_payload = request.await_args.kwargs["json"]
     assert json_payload["markdown"]["content"] == "hello friend"
     assert json_payload["msg_type"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["reply", "proactive"])
+async def test_c2c_markdown_leaves_out_mentions(path):
+    # QQ rejects qqbot-at-user in C2C with "C2C消息不支持qqbot-at-user".
+    request = AsyncMock(return_value={"id": "sent-c2c"})
+    api = cast(Any, SimpleNamespace(_http=SimpleNamespace(request=request)))
+    message = MessageChain(
+        chain=[At(qq="user-1", name="Alice"), Plain("\nhello")], use_markdown_=True
+    )
+    if path == "proactive":
+        adapter = QQOfficialPlatformAdapter(
+            {
+                "id": "qq-official-test",
+                "appid": "123",
+                "secret": "secret",
+                "enable_group_c2c": True,
+                "enable_guild_direct_message": False,
+            },
+            {},
+            asyncio.Queue(),
+        )
+        adapter.client.api = api
+        await adapter.send_by_session(
+            MessageSession("qq_official", MessageType.FRIEND_MESSAGE, "user-1"),
+            message,
+        )
+    else:
+        abm = AstrBotMessage()
+        abm.message_id = "msg-1"
+        abm.session_id = "user-1"
+        abm.self_id = "bot-1"
+        abm.sender = MessageMember(user_id="user-1", nickname="Alice")
+        abm.type = MessageType.FRIEND_MESSAGE
+        abm.message_str = "ping"
+        abm.message = []
+        abm.raw_message = botpy.message.C2CMessage(
+            cast(Any, None),
+            "event-1",
+            cast(
+                Any,
+                {"id": "msg-1", "author": {"user_openid": "user-1"}, "content": "ping"},
+            ),
+        )
+        event = QQOfficialMessageEvent(
+            "ping",
+            abm,
+            PlatformMetadata(name="qq_official", description="", id="qq-official-test"),
+            "user-1",
+            cast(Any, SimpleNamespace(api=api)),
+        )
+        await event._post_send_one(message)
+
+    assert cast(Any, request.await_args).kwargs["json"]["markdown"] == {
+        "content": "\nhello"
+    }
 
 
 @pytest.mark.asyncio

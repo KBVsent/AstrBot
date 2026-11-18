@@ -721,6 +721,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 group_openid=group_openid,
                 user_openid=user_openid,
             ),
+            c2c=user_openid is not None,
         )
 
         is_interaction = isinstance(source, botpy.interaction.Interaction)
@@ -1568,6 +1569,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
         convert_image_to_markdown: bool = False,
         image_host_chain: list[str] | None = None,
         local_image_hosts: dict[str, LocalBackend] | None = None,
+        c2c: bool = False,
     ):
         """将 MessageChain 解析为发送 payload 所需要素。
 
@@ -1578,6 +1580,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 这样图片能和 keyboard/markdown 共存于同一条 msg_type=2 消息。
             image_host_chain: 图床后端 id 有序优先链，透传给 image_to_markdown_fragment。
             local_image_hosts: 适配器自带的图床后端，同样透传。
+            c2c: C2C 的 markdown 拒收艾特标签，为 True 时省略 At。
 
         Returns:
             (plain_text, image_base64, image_file_path, record_file_path,
@@ -1603,7 +1606,7 @@ class QQOfficialMessageEvent(AstrMessageEvent):
                 text_content += i.text
             elif isinstance(i, At):
                 mention_id = str(i.qq) if i.qq else ""
-                if mention_id and mention_id != "all":
+                if mention_id and mention_id != "all" and not c2c:
                     plain_text += f'<qqbot-at-user id="{mention_id}" />'
                     text_content += f"@{i.name}" if i.name else ""
             elif isinstance(i, Reply):

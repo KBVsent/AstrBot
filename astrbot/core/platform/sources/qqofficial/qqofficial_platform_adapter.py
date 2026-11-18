@@ -500,6 +500,7 @@ class QQOfficialPlatformAdapter(Platform):
                 group_openid=session.session_id if is_qq_group else None,
                 user_openid=session.session_id if is_c2c else None,
             ),
+            c2c=is_c2c,
         )
         is_guild = session.message_type == MessageType.GROUP_MESSAGE and not is_qq_group
         content_text = plain_text if is_guild else text_content
